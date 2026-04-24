@@ -15,6 +15,7 @@ type Config struct {
 	Model       string
 	Interactive bool
 	Session    bool
+	Yes        bool
 	Verbose    bool
 	Help       bool
 }
@@ -39,6 +40,7 @@ func parseArgs(args []string) (Config, error) {
 	fs.BoolVar(&cfg.Verbose, "v", false, "Verbose mode")
 	fs.BoolVar(&cfg.Interactive, "i", false, "Interactive REPL mode")
 	fs.BoolVar(&cfg.Session, "session", false, "Enable session file for interactive mode")
+	fs.BoolVar(&cfg.Yes, "y", false, "Skip confirmation prompt")
 
 	if err := fs.Parse(args[1:]); err != nil {
 		if err == flag.ErrHelp {
@@ -86,6 +88,7 @@ func Run(args []string) error {
 		Verbose: cfg.Verbose,
 		Model:   cfg.Model,
 		Session: cfg.Session,
+		Yes:     cfg.Yes,
 	})
 
 	if cfg.Interactive {
@@ -124,6 +127,7 @@ Options:
   -ef string    Execute task from file path (mutually exclusive with -e)
   -i            Interactive REPL mode (type /exit or Ctrl+D to quit)
   -session      Enable session file for interactive mode
+  -y            Skip confirmation prompt (auto-confirm)
   -m string     Model to use (default: from gateway)
   -v            Verbose mode
   -h            Show this help
@@ -132,7 +136,7 @@ Examples:
   eva -e "create a web API in Go"
   eva -ef task.txt
   eva -i -session
-  eva> create a web API in Go
+  eva -e "list files" -y
   eva> add authentication
   eva> /exit`)
 }

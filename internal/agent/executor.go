@@ -23,6 +23,7 @@ type Config struct {
 	Verbose    bool
 	Model     string
 	Session   bool
+	Yes      bool
 	SessionPath string
 }
 
@@ -239,7 +240,7 @@ When user asks to run a command, read a file, create a file, edit a file, or any
 
 		a.messages = append(a.messages, Message{Role: "user", Content: input})
 
-		if err := a.handleResponse(resp, true); err != nil {
+		if err := a.handleResponse(resp, true, a.cfg.Yes); err != nil {
 			fmt.Printf("\033[31mError: %v\033[0m\n", err)
 		}
 	}
@@ -292,7 +293,7 @@ When user asks to run a command, read a file, create a file, edit a file, or any
 		return fmt.Errorf("gateway request failed: %w", err)
 	}
 
-	return a.handleResponse(resp, true)
+	return a.handleResponse(resp, true, a.cfg.Yes)
 }
 
 func (a *Agent) sendRequest(reqBody map[string]any) ([]byte, error) {
@@ -326,7 +327,7 @@ func (a *Agent) sendRequest(reqBody map[string]any) ([]byte, error) {
 	return body, nil
 }
 
-func (a *Agent) handleResponse(data []byte, interactive bool) error {
+func (a *Agent) handleResponse(data []byte, interactive, autoConfirm bool) error {
 	var resp map[string]any
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return fmt.Errorf("parse error: %w", err)
@@ -399,7 +400,7 @@ func (a *Agent) handleResponse(data []byte, interactive bool) error {
 		}
 
 		for _, cmd := range commands {
-			if err := executeCommand(cmd); err != nil {
+			if err := executeCommand(cmd, a.cfg.Yes); err != nil {
 				fmt.Printf("\033[31mError: %v\033[0m\n", err)
 			}
 		}
@@ -435,9 +436,19 @@ type Command struct {
 	Status string `json:"status,omitempty"`
 }
 
-func executeCommand(cmd Command) error {
+func executeCommand(cmd Command, autoConfirm bool) error {
 	switch cmd.Type {
 	case "bash":
+		if !autoConfirm {
+			fmt.Printf("\033[33mExecute '%s'? [y/N]\033[0m ", cmd.Command)
+			reader := bufio.NewReader(os.Stdin)
+			resp, _ := reader.ReadString('\n')
+			resp = strings.TrimSpace(strings.ToLower(resp))
+			if resp != "y" && resp != "yes" {
+				fmt.Println("\033[31mCancelled\033[0m")
+				return nil
+			}
+		}
 		return execBash(cmd.Command)
 	case "read_file":
 		return readFile(cmd.Path)
