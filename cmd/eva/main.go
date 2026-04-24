@@ -85,7 +85,6 @@ func Run(args []string) error {
 	}
 
 	ag := agent.New(agent.Config{
-		Verbose: cfg.Verbose,
 		Model:   cfg.Model,
 		Session: cfg.Session,
 		Yes:     cfg.Yes,
@@ -105,7 +104,7 @@ func Run(args []string) error {
 		task = string(data)
 	}
 
-	if err := ag.Execute(task); err != nil {
+	if err := ag.Execute(task, cfg.Interactive); err != nil {
 		return err
 	}
 

@@ -28,11 +28,10 @@ func init() {
 const GatewayURL = "http://localhost:1313/v1/chat/completions"
 
 type Config struct {
-	Verbose    bool
-	Model     string
-	Session   bool
-	Yes      bool
+	Model       string
+	Session     bool
 	SessionPath string
+	Yes        bool
 }
 
 type Message struct {
@@ -252,7 +251,7 @@ When user asks to run a command, read a file, create a file, edit a file, or any
 	return nil
 }
 
-func (a *Agent) Execute(task string) error {
+func (a *Agent) Execute(task string, interactive bool) error {
 	pwd, _ := os.Getwd()
 	usr, _ := user.Current()
 	shell := os.Getenv("SHELL")
