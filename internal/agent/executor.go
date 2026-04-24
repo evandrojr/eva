@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/peterh/liner"
 )
 
 var stdinReader *bufio.Reader
@@ -167,26 +169,53 @@ When user asks to run a command, read a file, create a file, edit a file, or any
 - User: %s
 - Shell: %s`, pwd, usr.Username, shell)
 
-	var prompt func(string) string = nil
-	stdinReader = bufio.NewReader(os.Stdin)
+	var prompt func(string) string
+
+	var line *liner.State
 
 	fmt.Println("\033[36mEVA Interactive Mode\033[0m")
-	fmt.Println("Type \033[33m/exit\033[0m or \033[33mCtrl+D\033[0m to quit")
+	fmt.Println("Type \033[33m/exit\033[0m, \033[33mCtrl+D\033[0m or \033[33mCtrl+C\033[0m to quit")
+	if liner.TerminalSupported() {
+		fmt.Println("Use \033[33m↑/↓\033[0m for history")
+	}
 	fmt.Println()
 
-	prompt = func(p string) string {
-		fmt.Fprint(os.Stdout, p)
-		os.Stdout.Sync()
-		in, _ := stdinReader.ReadString('\n')
-		return in
+	if liner.TerminalSupported() {
+		line = liner.NewLiner()
+		line.SetCtrlCAborts(true)
+		os.MkdirAll(filepath.Join(os.Getenv("HOME"), ".eva"), 0755)
+		historyPath := filepath.Join(os.Getenv("HOME"), ".eva", "history")
+		if f, err := os.Open(historyPath); err == nil {
+			line.ReadHistory(f)
+			f.Close()
+		}
+		defer func() {
+			if line != nil {
+				if f, err := os.Create(historyPath); err == nil {
+					line.WriteHistory(f)
+					f.Close()
+				}
+				line.Close()
+			}
+		}()
+
+		prompt = func(p string) string {
+			in, _ := line.Prompt(p)
+			return in
+		}
+	} else {
+		stdinReader := bufio.NewReader(os.Stdin)
+		prompt = func(p string) string {
+			fmt.Print(p)
+			in, _ := stdinReader.ReadString('\n')
+			return in
+		}
 	}
 
 	for {
 		input := prompt("\033[32meva>\033[0m ")
-		fmt.Fprintf(os.Stderr, "DEBUG: input=%q\n", input)
-		input = strings.NewReplacer("\r\n", "", "\r", "", "\n", "").Replace(input)
+		input = strings.NewReplacer("\r\n", "", "\r", "").Replace(input)
 		input = strings.TrimSpace(input)
-		fmt.Fprintf(os.Stderr, "DEBUG: trimmed=%q\n", input)
 		if input == "" {
 			continue
 		}
@@ -416,8 +445,8 @@ func executeCommand(cmd Command, autoConfirm bool) error {
 	case "bash":
 		if !autoConfirm {
 			fmt.Printf("\033[33mExecute '%s'? [y/N]\033[0m ", cmd.Command)
-			var resp string
-			fmt.Scanln(&resp)
+			reader := bufio.NewReader(os.Stdin)
+			resp, _ := reader.ReadString('\n')
 			resp = strings.NewReplacer("\r\n", "", "\r", "", "\n", "").Replace(resp)
 			resp = strings.TrimSpace(strings.ToLower(resp))
 			if resp != "y" && resp != "yes" {

@@ -11,6 +11,3 @@ test:
 
 clean:
 	rm -f eva
-	go clean -cache
-
-rebuild: clean build
