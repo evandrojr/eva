@@ -23,6 +23,26 @@ var globalReader *bufio.Reader
 
 func init() {
 	globalReader = bufio.NewReader(os.Stdin)
+	loadEnv()
+}
+
+func loadEnv() {
+	home, _ := os.UserHomeDir()
+	path := filepath.Join(home, ".eva", ".env")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "#") || line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 {
+			os.Setenv(parts[0], parts[1])
+		}
+	}
 }
 
 const GatewayURL = "http://localhost:1313/v1/chat/completions"
@@ -31,7 +51,8 @@ type Config struct {
 	Model       string
 	Session     bool
 	SessionPath string
-	Yes        bool
+	Yes         bool
+	Interactive bool
 }
 
 type Message struct {
@@ -119,7 +140,7 @@ var tools = []map[string]any{
 		"type": "function",
 		"function": map[string]any{
 			"name":        "websearch",
-			"description": "Search the web for information, locations, how to get there, travel tips, facts, or any question",
+			"description": "Search the web for information. Use when you need current info, facts, locations, travel tips, or any question",
 			"parameters": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -183,10 +204,16 @@ When user asks to RUN a command or do a task:
 - Example: {"type": "create_file", "path": "file.go", "content": "..."}
 - Example: {"type": "edit_file", "path": "file.go", "old": "old", "new": "new"}
 
-When user asks for INFORMATION (locations, how to get there, travel tips, facts, etc):
-- Use web search to find the information first
-- Then provide a clear answer with the results
-- DO NOT try to run the question as a bash command
+## When to use Web Search - IMPORTANT
+You MUST use websearch tool when:
+- User asks about current events, news, weather, prices, etc
+- You don't know the answer or are unsure
+- User asks for information you may not have (locations, travel, facts, etc)
+- User asks "how do I...", "what is...", "where is...", "when did..."
+- The question requires up-to-date information
+- You need to verify current data before answering
+
+After websearch, summarize the findings clearly.
 
 ## Context
 - Current directory: %s
@@ -247,20 +274,25 @@ func (a *Agent) Interactive() error {
 		shell = "/bin/bash"
 	}
 
-	systemPrompt := fmt.Sprintf(`You are EVA, an AI agent that executes commands in a terminal and manages files.
-
-## STRICT REQUIREMENT
-You MUST use the "execute" tool for EVERY action. Never just describe what you would do.
-Always call the execute tool with the commands array.
+	systemPrompt := fmt.Sprintf(`You are EVA, an AI agent that executes commands in a terminal, manages files, and searches the web.
 
 ## Tool Usage - REQUIRED
-When user asks to run a command, read a file, create a file, edit a file, or any task:
-- Call the "execute" tool with the commands array
+When user asks to RUN a command or do a task:
+- Call the "execute" tool with commands array
 - Example: {"type": "bash", "command": "ls -la"}
 - Example: {"type": "read_file", "path": "file.go"}
 - Example: {"type": "create_file", "path": "file.go", "content": "..."}
 - Example: {"type": "edit_file", "path": "file.go", "old": "old", "new": "new"}
 - Example: {"type": "update_kanban", "task": "task", "status": "todo"}
+
+## When to use Web Search - IMPORTANT
+You MUST use websearch tool when:
+- User asks about current events, news, weather, prices, etc
+- You don't know the answer or are unsure
+- User asks for information you may not have (locations, travel, facts, etc)
+- User asks "how do I...", "what is...", "where is...", "when did..."
+- The question requires up-to-date information
+- You need to verify current data before answering
 
 ## Context
 - Current directory: %s
@@ -369,10 +401,14 @@ When user asks to RUN a command or do a task:
 - Example: {"type": "create_file", "path": "file.go", "content": "..."}
 - Example: {"type": "edit_file", "path": "file.go", "old": "old", "new": "new"}
 
-When user asks for INFORMATION (locations, how to get there, travel tips, facts, etc):
-- Use web search to find the information first
-- Then provide a clear answer with the results
-- DO NOT try to run the question as a bash command
+## When to use Web Search - IMPORTANT
+You MUST use websearch tool when:
+- User asks about current events, news, weather, prices, etc
+- You don't know the answer or are unsure
+- User asks for information you may not have (locations, travel, facts, etc)
+- User asks "how do I...", "what is...", "where is...", "when did..."
+- The question requires up-to-date information
+- You need to verify current data before answering
 
 ## Context
 - Current directory: %s
@@ -391,12 +427,26 @@ When user asks for INFORMATION (locations, how to get there, travel tips, facts,
 		"tools":      tools,
 	}
 
-	resp, err := a.sendRequest(reqBody)
-	if err != nil {
-		return fmt.Errorf("gateway request failed: %w", err)
-	}
+	maxIterations := 5
+	for i := 0; i < maxIterations; i++ {
+		resp, err := a.sendRequest(reqBody)
+		if err != nil {
+			return fmt.Errorf("gateway request failed: %w", err)
+		}
 
-	return a.handleResponse(resp, true, a.cfg.Yes)
+		if err := a.handleResponse(resp, true, a.cfg.Yes); err != nil {
+			return err
+		}
+
+		if len(a.messages) == 0 {
+			break
+		}
+		lastMsg := a.messages[len(a.messages)-1]
+		if len(lastMsg.ToolCalls) == 0 {
+			break
+		}
+	}
+	return nil
 }
 
 func (a *Agent) sendRequest(reqBody map[string]any) ([]byte, error) {
@@ -456,7 +506,54 @@ func (a *Agent) handleResponse(data []byte, interactive, autoConfirm bool) error
 
 		tc0 := toolCalls[0].(map[string]any)
 		fn := tc0["function"].(map[string]any)
-		
+		fnName := fn["name"].(string)
+
+		if fnName == "websearch" {
+			query := ""
+			switch a := fn["arguments"].(type) {
+			case string:
+				var args map[string]any
+				json.Unmarshal([]byte(a), &args)
+				if q, ok := args["query"].(string); ok {
+					query = q
+				}
+			case map[string]any:
+				if q, ok := fn["arguments"].(map[string]any)["query"].(string); ok {
+					query = q
+				}
+			}
+			results, err := a.doWebSearch(query)
+			if err != nil {
+				a.writeOutput("\033[31mSearch error: %v\033[0m\n", err)
+			} else {
+				a.writeOutput("\033[36m%s\033[0m\n", results)
+			}
+			return nil
+		}
+		/*
+		if fnName == "websearch" {
+			query := ""
+			switch a := fn["arguments"].(type) {
+			case string:
+				var args map[string]any
+				json.Unmarshal([]byte(a), &args)
+				if q, ok := args["query"].(string); ok {
+					query = q
+				}
+			case map[string]any:
+				if q, ok := fn["arguments"].(map[string]any)["query"].(string); ok {
+					query = q
+				}
+			}
+			results, err := a.doWebSearch(query)
+			if err != nil {
+				a.writeOutput("\033[31mSearch error: %v\033[0m\n", err)
+			} else {
+				a.writeOutput("\033[36m%s\033[0m\n", results)
+			}
+			return nil
+		}
+		*/
 		var commands []Command
 		args := make(map[string]any)
 		
@@ -503,8 +600,10 @@ func (a *Agent) handleResponse(data []byte, interactive, autoConfirm bool) error
 		}
 
 		for _, cmd := range commands {
-			if err := a.executeCommand(cmd, a.cfg.Yes); err != nil {
+			if err := a.executeCommand(cmd, autoConfirm); err != nil {
 				a.writeOutput("\033[31mError: %v\033[0m\n", err)
+			} else {
+				a.writeOutput("\033[32mDone: %s\033[0m\n", cmd.Type)
 			}
 		}
 
@@ -543,6 +642,9 @@ func (a *Agent) executeCommand(cmd Command, autoConfirm bool) error {
 	switch cmd.Type {
 	case "bash":
 		if !autoConfirm {
+			if !a.cfg.Interactive {
+				return fmt.Errorf("enable auto-confirm or run in terminal mode")
+			}
 			a.writeOutput("\033[33mExecute '%s'? [y/N]\033[0m ", cmd.Command)
 			reader := bufio.NewReader(os.Stdin)
 			resp, _ := reader.ReadString('\n')
@@ -701,4 +803,58 @@ func (a *Agent) updateKanban(task, status string) error {
 		a.writeOutput("\033[32mKanban updated\033[0m\n")
 	}
 	return err
+}
+
+func (a *Agent) doWebSearch(query string) (string, error) {
+	apiKey := os.Getenv("FIRECRAWL_API_KEY")
+	if apiKey == "" {
+		apiKey = os.Getenv("FIRECRAWL_API_KEY")
+	}
+	if apiKey == "" {
+		return "", fmt.Errorf("FIRECRAWL_API_KEY not set")
+	}
+
+	searchURL := "https://api.firecrawl.dev/v2/search"
+	jsonData, _ := json.Marshal(map[string]any{
+		"query": query,
+		"limit": 5,
+	})
+
+	httpReq, err := http.NewRequest("POST", searchURL, bytes.NewReader(jsonData))
+	if err != nil {
+		return "", err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("search failed: %s", string(body))
+	}
+
+	var result map[string]any
+	json.Unmarshal(body, &result)
+
+	var output string
+	if data, ok := result["data"].([]any); ok && len(data) > 0 {
+		for i, item := range data {
+			if i > 4 {
+				break
+			}
+			m := item.(map[string]any)
+			title, _ := m["title"].(string)
+			url, _ := m["url"].(string)
+			desc, _ := m["description"].(string)
+			output += fmt.Sprintf("%d. %s\n   %s\n   %s\n\n", i+1, title, url, desc)
+		}
+	}
+
+	return output, nil
 }

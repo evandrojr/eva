@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/eva/agent/internal/agent"
 )
@@ -29,6 +30,7 @@ type Config struct {
 	Install     bool
 	Session     bool
 	Yes         bool
+	Setup       bool
 	Help        bool
 }
 
@@ -55,7 +57,9 @@ func parseArgs(args []string) (Config, error) {
 	fs.BoolVar(&cfg.Lan, "lan", false, "Serve on all interfaces")
 	fs.BoolVar(&cfg.Install, "install", false, "Install as systemd service")
 	fs.BoolVar(&cfg.Session, "session", false, "Enable session file")
-	fs.BoolVar(&cfg.Yes, "y", false, "Skip confirmation prompt")
+fs.BoolVar(&cfg.Yes, "y", false, "Skip confirmation prompt")
+	fs.BoolVar(&cfg.Help, "h", false, "Show this help")
+	fs.BoolVar(&cfg.Setup, "setup", false, "Setup API keys")
 
 	if err := fs.Parse(args[1:]); err != nil {
 		if err == flag.ErrHelp {
@@ -77,8 +81,12 @@ func Run(args []string) error {
 		return err
 	}
 
-	if cfg.Help {
+	if cfg.Help || cfg.Setup {
 		printHelp()
+		if cfg.Setup {
+			fmt.Println("\n--- Setup ---")
+			return setupAPIKeys()
+		}
 		return nil
 	}
 
@@ -131,8 +139,8 @@ func runWeb(port string, lan bool) error {
 
 		if r.Method == "POST" {
 			cmd := r.FormValue("command")
-			_ = r.FormValue("auto") == "on" // auto-confirm is implicit in Web mode
-			ag := agent.New(agent.Config{Yes: true}) // Web mode always auto-confirms
+			autoConfirm := r.FormValue("auto") == "on"
+			ag := agent.New(agent.Config{Yes: autoConfirm})
 			err := ag.Execute(cmd, false)
 
 			var out string
@@ -154,6 +162,23 @@ func runWeb(port string, lan bool) error {
 		w.Header().Set("Connection", "keep-alive")
 
 		cmd := exec.Command("journalctl", "-u", "eva", "-f", "-n", "50")
+		stdout, _ := cmd.StdoutPipe()
+		cmd.Start()
+		defer cmd.Process.Kill()
+
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			fmt.Fprintf(w, "data: %s\n\n", scanner.Text())
+			w.(http.Flusher).Flush()
+		}
+	})
+
+	http.HandleFunc("/gwlogs", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		cmd := exec.Command("journalctl", "-u", "aigatiator", "-f", "-n", "50")
 		stdout, _ := cmd.StdoutPipe()
 		cmd.Start()
 		defer cmd.Process.Kill()
@@ -265,18 +290,56 @@ func printHelp() {
 Usage:
   eva -e "command"     Execute task
   eva -i              Interactive mode
+  eva -term           Terminal mode (SSH/WSL)
   eva -web            Web UI
+  eva -setup          Setup API keys
 
 Options:
   -e string    Execute task
   -ef file     Execute from file
   -i           Interactive mode
+  -term        Terminal mode
   -web         Web UI
   -lan         Serve on LAN (all interfaces)
   -port        Web port (default 11313)
   -install     Install as systemd service
   -y           Skip confirmation
   -h           Help`)
+}
+
+func setupAPIKeys() error {
+	home, _ := os.UserHomeDir()
+	dir := filepath.Join(home, ".eva")
+	os.MkdirAll(dir, 0755)
+	path := filepath.Join(dir, ".env")
+
+	var existing string
+	if data, err := os.ReadFile(path); err == nil {
+		existing = string(data)
+	}
+
+	fmt.Print("Firecrawl API Key (fc-...): ")
+	reader := bufio.NewReader(os.Stdin)
+	key, _ := reader.ReadString('\n')
+	key = strings.TrimSpace(key)
+
+	if key == "" && existing != "" {
+		fmt.Println("Using existing key")
+		return nil
+	}
+
+	if key == "" {
+		return fmt.Errorf("no key provided")
+	}
+
+	env := fmt.Sprintf("FIRECRAWL_API_KEY=%s", key)
+	if existing != "" && !strings.Contains(existing, "FIRECRAWL_API_KEY") {
+		env = existing + "\n" + env
+	}
+
+	os.WriteFile(path, []byte(env), 0644)
+	fmt.Println("API key saved to", path)
+	return nil
 }
 
 var indexHTML = `
@@ -295,8 +358,7 @@ var indexHTML = `
                 .tab.active { background: #00d4ff; color: #1a1a2e }
                 .cmd { width: 100%; padding: 15px; border-radius: 4px; border: none; margin-bottom: 10px }
                 button { padding: 12px 24px; border-radius: 4px; border: none; background: #00d4ff; color: #1a1a2e; cursor: pointer }
-                #output, #editor, #logs { background: #16213e; padding: 20px; border-radius: 4px; white-space: pre-wrap; margin-top: 20px; min-height: 200px; }
-                #output { display: none }
+                #output, #editor, #logs { background: #16213e; padding: 20px; border-radius: 4px; white-space: pre-wrap; margin-top: 20px; }
                 #logs { display: none; height: 300px; overflow-y: auto; font-family: monospace; font-size: 12px; border: 1px solid #333; }
                 #editor { display: none; font-family: monospace; width: 100%; color: #fff; }
                 .footer { margin-top: 40px; padding-top: 20px; border-top: 1px solid #333; display: flex; align-items: center; gap: 10px; }
@@ -313,13 +375,18 @@ var indexHTML = `
                 .file { background: #16213e; padding: 10px; border-radius: 4px; cursor: pointer }
                 .file:hover { background: #1f2f4f }
                 .dir { color: #00d4ff }
+                #ai-messages { height: 400px; overflow-y: auto; background: #16213e; padding: 15px; border-radius: 4px; margin-top: 10px; }
+                .ai-user { color: #00d4ff; font-weight: bold; margin: 10px 0; }
+                .ai-assistant { color: #90EE90; margin: 10px 0; white-space: pre-wrap; }
+                .ai-tool-call { color: #ffaa00; font-family: monospace; font-size: 12px; margin: 5px 0; }
+                #gateway-logs { font-family: monospace; font-size: 11px; color: #888; margin-top: 20px; border-top: 1px solid #333; padding-top: 10px; }
         </style>
 </head>
 <body>
         <div class="container">
                 <h1>EVA 🤖</h1>
                 <div class="tabs">
-                        <button class="tab active" data-tab="cmd">Command</button>
+                        <button class="tab active" data-tab="cmd">Command + AI</button>
                         <button class="tab" data-tab="files">Files</button>
                 </div>
                 <div id="cmd-tab">
@@ -328,7 +395,7 @@ var indexHTML = `
                                 <button>Run</button>
                         </form>
                         <label><input type="checkbox" name="auto"> Auto-confirm</label>
-                        <div id="output"></div>
+                        <div id="ai-messages"></div>
                 </div>
                 <div id="files-tab" class="hidden">
                         <button id="refresh-btn">Refresh</button>
@@ -339,11 +406,17 @@ var indexHTML = `
                 </div>
 
                 <div id="logs"></div>
+                <div id="gateway-logs"></div>
 
                 <div class="footer">
-                        <span>Mostrar logs</span>
+                        <span>Logs EVA</span>
                         <label class="switch">
                                 <input type="checkbox" id="log-toggle">
+                                <span class="slider"></span>
+                        </label>
+                        <span style="margin-left: 20px">AI Gateway</span>
+                        <label class="switch">
+                                <input type="checkbox" id="gwlog-toggle">
                                 <span class="slider"></span>
                         </label>
                 </div>
@@ -391,18 +464,48 @@ var indexHTML = `
                                 if (tab === 'files') loadFiles(currentPath);
                         });
                 });
+                let gwLogSource = null;
+                document.getElementById('gwlog-toggle').addEventListener('change', e => {
+                        const gwLogs = document.getElementById('gateway-logs');
+                        if (e.target.checked) {
+                                gwLogs.style.display = 'block';
+                                startGwLogs();
+                        } else {
+                                gwLogs.style.display = 'none';
+                                stopGwLogs();
+                        }
+                });
+                function startGwLogs() {
+                        if (gwLogSource) return;
+                        gwLogSource = new EventSource('/gwlogs');
+                        gwLogSource.onmessage = e => {
+                                const gwLogs = document.getElementById('gateway-logs');
+                                gwLogs.textContent += e.data + '\n';
+                                gwLogs.scrollTop = gwLogs.scrollHeight;
+                        };
+                }
+                function stopGwLogs() {
+                        if (gwLogSource) {
+                                gwLogSource.close();
+                                gwLogSource = null;
+                        }
+                }
                 document.getElementById('cmd-form').addEventListener('submit', async e => {
                         e.preventDefault();
                         const btn = e.target.querySelector('button');
-                        const output = document.getElementById('output');
+                        const input = e.target.querySelector('input[name="command"]').value;
                         btn.disabled = true;
                         btn.textContent = 'Running...';
-                        output.style.display = 'none';
                         try {
                                 const res = await fetch('/', { method: 'POST', body: new FormData(e.target) });
                                 const data = await res.json();
-output.textContent = data.output.replace(/\x1b\[[0-9;]*m/g, '');
-                        output.style.display = 'block';
+                                
+                                // Add to AI chat in same tab
+                                const aiMsgs = document.getElementById('ai-messages');
+                                aiMsgs.innerHTML += '<div class="ai-user">User: ' + input + '</div>';
+                                aiMsgs.innerHTML += '<div class="ai-assistant">' + data.output.replace(/\x1b\[[0-9;]*m/g, '') + '</div>';
+                                aiMsgs.scrollTop = aiMsgs.scrollHeight;
+                                e.target.querySelector('input[name="command"]').value = '';
                         } finally {
                                 btn.disabled = false;
                                 btn.textContent = 'Run';
