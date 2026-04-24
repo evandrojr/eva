@@ -118,6 +118,20 @@ var tools = []map[string]any{
 	{
 		"type": "function",
 		"function": map[string]any{
+			"name":        "websearch",
+			"description": "Search the web for information, locations, how to get there, travel tips, facts, or any question",
+			"parameters": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"query": map[string]any{"type": "string", "description": "The search query"},
+				},
+				"required": []string{"query"},
+			},
+		},
+	},
+	{
+		"type": "function",
+		"function": map[string]any{
 			"name":        "execute",
 			"description": "Execute commands in terminal, read/create/edit files, or manage kanban",
 			"parameters": map[string]any{
@@ -145,6 +159,80 @@ var tools = []map[string]any{
 			},
 		},
 	},
+}
+
+func (a *Agent) Terminal() error {
+	if a.cfg.Session {
+		defer a.saveSession()
+	}
+
+	pwd, _ := os.Getwd()
+	usr, _ := user.Current()
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/bash"
+	}
+
+	systemPrompt := fmt.Sprintf(`You are EVA, an AI agent that executes commands in a terminal, manages files, and searches the web.
+
+## Tool Usage - REQUIRED
+When user asks to RUN a command or do a task:
+- Call the "execute" tool with commands array
+- Example: {"type": "bash", "command": "ls -la"}
+- Example: {"type": "read_file", "path": "file.go"}
+- Example: {"type": "create_file", "path": "file.go", "content": "..."}
+- Example: {"type": "edit_file", "path": "file.go", "old": "old", "new": "new"}
+
+When user asks for INFORMATION (locations, how to get there, travel tips, facts, etc):
+- Use web search to find the information first
+- Then provide a clear answer with the results
+- DO NOT try to run the question as a bash command
+
+## Context
+- Current directory: %s
+- User: %s
+- Shell: %s`, pwd, usr.Username, shell)
+
+	fmt.Println("\033[36mEVA Terminal Mode\033[0m")
+	fmt.Println("Type \033[33m/exit\033[0m or \033[33mCtrl+D\033[0m to quit")
+	fmt.Println()
+
+	stdinReader := bufio.NewReader(os.Stdin)
+
+	for {
+		fmt.Print("\033[32meva>\033[0m ")
+		input, _ := stdinReader.ReadString('\n')
+		input = strings.NewReplacer("\r\n", "", "\r", "").Replace(input)
+		input = strings.TrimSpace(input)
+		if input == "" {
+			continue
+		}
+		if input == "/exit" || input == "/quit" {
+			fmt.Println("\033[33mGoodbye!\033[0m")
+			break
+		}
+
+		reqBody := map[string]any{
+			"model":    a.cfg.Model,
+			"messages": append(a.messagesForRequest(), map[string]any{
+				"role":    "system",
+				"content": systemPrompt,
+			}, map[string]any{
+				"role":    "user",
+				"content": input,
+			}),
+			"tools": tools,
+		}
+
+		resp, err := a.sendRequest(reqBody)
+		if err != nil {
+			fmt.Printf("\033[31mError: %v\033[0m\n", err)
+			continue
+		}
+
+		a.handleResponse(resp, false, true)
+	}
+	return nil
 }
 
 func (a *Agent) Interactive() error {
@@ -271,20 +359,20 @@ func (a *Agent) Execute(task string, interactive bool) error {
 		shell = "/bin/bash"
 	}
 
-	systemPrompt := fmt.Sprintf(`You are EVA, an AI agent that executes commands in a terminal and manages files.
-
-## STRICT REQUIREMENT
-You MUST use the "execute" tool for EVERY action. Never just describe what you would do.
-Always call the execute tool with the commands array.
+	systemPrompt := fmt.Sprintf(`You are EVA, an AI agent that executes commands in a terminal, manages files, and searches the web.
 
 ## Tool Usage - REQUIRED
-When user asks to run a command, read a file, create a file, edit a file, or any task:
-- Call the "execute" tool with the commands array
+When user asks to RUN a command or do a task:
+- Call the "execute" tool with commands array
 - Example: {"type": "bash", "command": "ls -la"}
 - Example: {"type": "read_file", "path": "file.go"}
 - Example: {"type": "create_file", "path": "file.go", "content": "..."}
 - Example: {"type": "edit_file", "path": "file.go", "old": "old", "new": "new"}
-- Example: {"type": "update_kanban", "task": "task", "status": "todo"}
+
+When user asks for INFORMATION (locations, how to get there, travel tips, facts, etc):
+- Use web search to find the information first
+- Then provide a clear answer with the results
+- DO NOT try to run the question as a bash command
 
 ## Context
 - Current directory: %s

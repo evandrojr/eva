@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 
 	"github.com/eva/agent/internal/agent"
 )
@@ -20,6 +22,7 @@ type Config struct {
 	ExecuteFile string
 	Model       string
 	Interactive bool
+	Terminal    bool
 	Web         bool
 	Lan         bool
 	Port        string
@@ -46,6 +49,7 @@ func parseArgs(args []string) (Config, error) {
 	fs.StringVar(&cfg.ExecuteFile, "ef", "", "Execute task from file")
 	fs.StringVar(&cfg.Model, "m", "", "Model to use")
 	fs.BoolVar(&cfg.Interactive, "i", false, "Interactive REPL mode")
+	fs.BoolVar(&cfg.Terminal, "basic_term", false, "Terminal compatibility mode (SSH/WSL)")
 	fs.BoolVar(&cfg.Web, "web", false, "Web UI mode")
 	fs.StringVar(&cfg.Port, "port", "11313", "Web UI port")
 	fs.BoolVar(&cfg.Lan, "lan", false, "Serve on all interfaces")
@@ -78,7 +82,7 @@ func Run(args []string) error {
 		return nil
 	}
 
-	if cfg.Execute == "" && cfg.ExecuteFile == "" && !cfg.Interactive && !cfg.Web && !cfg.Install {
+	if cfg.Execute == "" && cfg.ExecuteFile == "" && !cfg.Interactive && !cfg.Terminal && !cfg.Web && !cfg.Install {
 		printHelp()
 		return nil
 	}
@@ -97,7 +101,10 @@ func Run(args []string) error {
 		Yes:     cfg.Yes,
 	})
 
-	if cfg.Interactive {
+	if cfg.Interactive || cfg.Terminal {
+		if cfg.Terminal {
+			return ag.Terminal()
+		}
 		return ag.Interactive()
 	}
 
@@ -211,9 +218,20 @@ func runWeb(port string, lan bool) error {
 }
 
 func installService(port string) error {
+	if runtime.GOOS != "linux" {
+		log.Fatal("A instalação como serviço só é suportada no Linux.")
+	}
+
 	execPath, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("get executable: %w", err)
+		return fmt.Errorf("erro ao obter caminho do executável: %w", err)
+	}
+	execPath, _ = filepath.Abs(execPath)
+	workDir := filepath.Dir(execPath)
+
+	username := os.Getenv("SUDO_USER")
+	if username == "" {
+		username = "root"
 	}
 
 	service := fmt.Sprintf(`[Unit]
@@ -222,14 +240,15 @@ After=network.target
 
 [Service]
 Type=simple
+User=%s
+WorkingDirectory=%s
 ExecStart=%s -web -lan -port %s
 Restart=always
-RestartSec=5
-WorkingDirectory=%s
+RestartSec=3
 
 [Install]
 WantedBy=multi-user.target
-`, execPath, port, os.Getenv("PWD"))
+`, username, workDir, execPath, port)
 
 	path := "/etc/systemd/system/eva.service"
 	if err := os.WriteFile(path, []byte(service), 0644); err != nil {
@@ -374,10 +393,20 @@ var indexHTML = `
                 });
                 document.getElementById('cmd-form').addEventListener('submit', async e => {
                         e.preventDefault();
-                        const res = await fetch('/', { method: 'POST', body: new FormData(e.target) });
-                        const data = await res.json();
-                        document.getElementById('output').textContent = data.output;
-                        document.getElementById('output').style.display = 'block';
+                        const btn = e.target.querySelector('button');
+                        const output = document.getElementById('output');
+                        btn.disabled = true;
+                        btn.textContent = 'Running...';
+                        output.style.display = 'none';
+                        try {
+                                const res = await fetch('/', { method: 'POST', body: new FormData(e.target) });
+                                const data = await res.json();
+output.textContent = data.output.replace(/\x1b\[[0-9;]*m/g, '');
+                        output.style.display = 'block';
+                        } finally {
+                                btn.disabled = false;
+                                btn.textContent = 'Run';
+                        }
                 });
                 async function loadFiles(path) {
                         currentPath = path;

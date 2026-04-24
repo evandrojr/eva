@@ -2,6 +2,9 @@
 eva
 agent
 
+# Air build
+tmp/
+
 # Go workspace
 go.work
 go.work.sum
