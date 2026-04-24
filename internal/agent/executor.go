@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/peterh/liner"
 )
 
 const GatewayURL = "http://localhost:1313/v1/chat/completions"
@@ -131,11 +133,6 @@ func (a *Agent) Interactive() error {
 		defer a.saveSession()
 	}
 
-	reader := bufio.NewReader(os.Stdin)
-	fmt.Println("\033[36mEVA Interactive Mode\033[0m")
-	fmt.Println("Type \033[33m/exit\033[0m or \033[33mCtrl+D\033[0m to quit")
-	fmt.Println()
-
 	pwd, _ := os.Getwd()
 	usr, _ := user.Current()
 	shell := os.Getenv("SHELL")
@@ -160,19 +157,63 @@ Command types:
 - User: %s
 - Shell: %s`, pwd, usr.Username, shell)
 
-	for {
-		fmt.Print("\033[32meva>\033[0m ")
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			break
+	var line *liner.State
+	var prompt func(string) string
+	reader := bufio.NewReader(os.Stdin)
+
+	if liner.TerminalSupported() {
+		line = liner.NewLiner()
+		line.SetCtrlCAborts(true)
+		os.MkdirAll(filepath.Join(os.Getenv("HOME"), ".eva"), 0755)
+		historyPath := filepath.Join(os.Getenv("HOME"), ".eva", "history")
+		if f, err := os.Open(historyPath); err == nil {
+			line.ReadHistory(f)
+			f.Close()
 		}
-		line = strings.TrimSpace(line)
-		if line == "" {
+		defer func() {
+			if line != nil {
+				if f, err := os.Create(historyPath); err == nil {
+					line.WriteHistory(f)
+					f.Close()
+				}
+				line.Close()
+			}
+		}()
+
+		fmt.Println("\033[36mEVA Interactive Mode\033[0m")
+		fmt.Println("Type \033[33m/exit\033[0m, \033[33mCtrl+D\033[0m or \033[33mCtrl+C\033[0m to quit")
+		fmt.Println("Use \033[33m↑/↓\033[0m for history")
+		fmt.Println()
+
+		prompt = func(p string) string {
+			in, _ := line.Prompt(p)
+			return in
+		}
+	} else {
+		fmt.Println("\033[36mEVA Interactive Mode\033[0m")
+		fmt.Println("Type \033[33m/exit\033[0m or \033[33mCtrl+D\033[0m to quit")
+		fmt.Println()
+
+		prompt = func(p string) string {
+			fmt.Print(p)
+			in, _ := reader.ReadString('\n')
+			return in
+		}
+	}
+
+	for {
+		input := prompt("\033[32meva>\033[0m ")
+		input = strings.TrimSpace(input)
+		if input == "" {
 			continue
 		}
-		if line == "/exit" || line == "/quit" {
+		if input == "/exit" || input == "/quit" {
 			fmt.Println("\033[33mGoodbye!\033[0m")
 			break
+		}
+
+		if line != nil {
+			line.AppendHistory(input)
 		}
 
 		reqBody := map[string]any{
@@ -182,10 +223,9 @@ Command types:
 				"content": systemPrompt,
 			}, map[string]any{
 				"role":    "user",
-				"content": line,
+				"content": input,
 			}),
 			"tools":   tools,
-			"tool_choice": map[string]any{"type": "function", "function": map[string]any{"name": "execute"}},
 		}
 
 		resp, err := a.sendRequest(reqBody)
@@ -194,7 +234,7 @@ Command types:
 			continue
 		}
 
-		a.messages = append(a.messages, Message{Role: "user", Content: line})
+		a.messages = append(a.messages, Message{Role: "user", Content: input})
 
 		if err := a.handleResponse(resp, true); err != nil {
 			fmt.Printf("\033[31mError: %v\033[0m\n", err)
@@ -239,7 +279,6 @@ Command types:
 			{"role": "user", "content": task},
 		},
 		"tools":      tools,
-		"tool_choice": map[string]any{"type": "function", "function": map[string]any{"name": "execute"}},
 	}
 
 	resp, err := a.sendRequest(reqBody)
