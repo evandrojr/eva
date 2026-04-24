@@ -1,5 +1,6 @@
 # Binaries
 eva
+agent
 
 # Go workspace
 go.work
@@ -23,4 +24,4 @@ bin/
 # OS
 .DS_Store
 Thumbs.db
-eva
+
