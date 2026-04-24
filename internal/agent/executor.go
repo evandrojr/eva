@@ -54,14 +54,25 @@ type ToolFunction struct {
 type Agent struct {
 	cfg      Config
 	messages []Message
+	output   bytes.Buffer
 }
 
 func New(cfg Config) *Agent {
-	a := &Agent{cfg: cfg, messages: []Message{}}
+	a := &Agent{cfg: cfg, messages: []Message{}, output: bytes.Buffer{}}
 	if cfg.Session {
 		a.loadSession()
 	}
 	return a
+}
+
+func (a *Agent) GetOutput() string {
+	return a.output.String()
+}
+
+func (a *Agent) writeOutput(format string, args ...any) {
+	s := fmt.Sprintf(format, args...)
+	a.output.WriteString(s)
+	fmt.Print(s)
 }
 
 func (a *Agent) loadSession() {
@@ -252,6 +263,7 @@ When user asks to run a command, read a file, create a file, edit a file, or any
 }
 
 func (a *Agent) Execute(task string, interactive bool) error {
+	a.output.Reset()
 	pwd, _ := os.Getwd()
 	usr, _ := user.Current()
 	shell := os.Getenv("SHELL")
@@ -403,8 +415,8 @@ func (a *Agent) handleResponse(data []byte, interactive, autoConfirm bool) error
 		}
 
 		for _, cmd := range commands {
-			if err := executeCommand(cmd, a.cfg.Yes); err != nil {
-				fmt.Printf("\033[31mError: %v\033[0m\n", err)
+			if err := a.executeCommand(cmd, a.cfg.Yes); err != nil {
+				a.writeOutput("\033[31mError: %v\033[0m\n", err)
 			}
 		}
 
@@ -419,7 +431,7 @@ func (a *Agent) handleResponse(data []byte, interactive, autoConfirm bool) error
 	}
 
 	if content, ok := msg["content"].(string); ok && content != "" {
-		fmt.Printf("\033[36m%s\033[0m\n", content)
+		a.writeOutput("\033[36m%s\033[0m\n", content)
 		if interactive {
 			a.messages = append(a.messages, Message{Role: "assistant", Content: content})
 		}
@@ -439,44 +451,64 @@ type Command struct {
 	Status string `json:"status,omitempty"`
 }
 
-func executeCommand(cmd Command, autoConfirm bool) error {
+func (a *Agent) executeCommand(cmd Command, autoConfirm bool) error {
 	switch cmd.Type {
 	case "bash":
 		if !autoConfirm {
-			fmt.Printf("\033[33mExecute '%s'? [y/N]\033[0m ", cmd.Command)
+			a.writeOutput("\033[33mExecute '%s'? [y/N]\033[0m ", cmd.Command)
 			reader := bufio.NewReader(os.Stdin)
 			resp, _ := reader.ReadString('\n')
 			resp = strings.NewReplacer("\r\n", "", "\r", "", "\n", "").Replace(resp)
 			resp = strings.TrimSpace(strings.ToLower(resp))
 			if resp != "y" && resp != "yes" {
-				fmt.Println("\033[31mCancelled\033[0m")
+				a.writeOutput("\033[31mCancelled\033[0m\n")
 				return nil
 			}
 		}
-		return execBash(cmd.Command)
+		return a.execBash(cmd.Command)
 	case "read_file":
-		return readFile(cmd.Path)
+		return a.readFile(cmd.Path)
 	case "create_file":
-		return createFile(cmd.Path, cmd.Content)
+		return a.createFile(cmd.Path, cmd.Content)
 	case "edit_file":
-		return editFile(cmd.Path, cmd.Old, cmd.New)
+		return a.editFile(cmd.Path, cmd.Old, cmd.New)
 	case "update_kanban":
-		return updateKanban(cmd.Task, cmd.Status)
+		return a.updateKanban(cmd.Task, cmd.Status)
 	default:
 		return fmt.Errorf("unknown command type: %s", cmd.Type)
 	}
 }
 
-func execBash(cmd string) error {
-	fmt.Printf("\033[33m$ %s\033[0m\n", cmd)
+func (a *Agent) execBash(cmd string) error {
+	a.writeOutput("\033[33m$ %s\033[0m\n", cmd)
 	execCmd := exec.Command("bash", "-c", cmd)
-	execCmd.Stdout = os.Stdout
-	execCmd.Stderr = os.Stderr
-	execCmd.Dir, _ = os.Getwd()
-	return execCmd.Run()
+	
+	// Create pipes to capture output and still show it
+	stdoutPipe, _ := execCmd.StdoutPipe()
+	stderrPipe, _ := execCmd.StderrPipe()
+	
+	if err := execCmd.Start(); err != nil {
+		return err
+	}
+
+	go func() {
+		scanner := bufio.NewScanner(stdoutPipe)
+		for scanner.Scan() {
+			a.writeOutput("%s\n", scanner.Text())
+		}
+	}()
+
+	go func() {
+		scanner := bufio.NewScanner(stderrPipe)
+		for scanner.Scan() {
+			a.writeOutput("%s\n", scanner.Text())
+		}
+	}()
+
+	return execCmd.Wait()
 }
 
-func readFile(path string) error {
+func (a *Agent) readFile(path string) error {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
 		return err
@@ -485,11 +517,11 @@ func readFile(path string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("\033[36m--- %s ---\n%s\033[0m\n", absPath, string(data))
+	a.writeOutput("\033[36m--- %s ---\n%s\033[0m\n", absPath, string(data))
 	return nil
 }
 
-func createFile(path, content string) error {
+func (a *Agent) createFile(path, content string) error {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
 		return err
@@ -499,11 +531,11 @@ func createFile(path, content string) error {
 	if err := os.WriteFile(absPath, []byte(content), 0644); err != nil {
 		return err
 	}
-	fmt.Printf("\033[32mCreated: %s\033[0m\n", absPath)
+	a.writeOutput("\033[32mCreated: %s\033[0m\n", absPath)
 	return nil
 }
 
-func editFile(path, oldStr, newStr string) error {
+func (a *Agent) editFile(path, oldStr, newStr string) error {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
 		return err
@@ -516,17 +548,21 @@ func editFile(path, oldStr, newStr string) error {
 	if err := os.WriteFile(absPath, []byte(content), 0644); err != nil {
 		return err
 	}
-	fmt.Printf("\033[32mEdited: %s\033[0m\n", absPath)
+	a.writeOutput("\033[32mEdited: %s\033[0m\n", absPath)
 	return nil
 }
 
-func updateKanban(task, status string) error {
+func (a *Agent) updateKanban(task, status string) error {
 	kanbanPath := "kanban.md"
 
 	data, err := os.ReadFile(kanbanPath)
 	if err != nil {
 		content := fmt.Sprintf("# Kanban\n\n## To Do\n- [ ] %s\n\n## In Progress\n\n## Done\n", task)
-		return os.WriteFile(kanbanPath, []byte(content), 0644)
+		err := os.WriteFile(kanbanPath, []byte(content), 0644)
+		if err == nil {
+			a.writeOutput("\033[32mKanban created and task added\033[0m\n")
+		}
+		return err
 	}
 
 	lines := strings.Split(string(data), "\n")
@@ -572,5 +608,9 @@ func updateKanban(task, status string) error {
 		}
 	}
 
-	return os.WriteFile(kanbanPath, []byte(strings.Join(newLines, "\n")), 0644)
+	err = os.WriteFile(kanbanPath, []byte(strings.Join(newLines, "\n")), 0644)
+	if err == nil {
+		a.writeOutput("\033[32mKanban updated\033[0m\n")
+	}
+	return err
 }

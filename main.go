@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 
 	"github.com/eva/agent/internal/agent"
 )
@@ -76,7 +78,7 @@ func Run(args []string) error {
 		return nil
 	}
 
-	if cfg.Execute == "" && cfg.ExecuteFile == "" && !cfg.Interactive && !cfg.Web {
+	if cfg.Execute == "" && cfg.ExecuteFile == "" && !cfg.Interactive && !cfg.Web && !cfg.Install {
 		printHelp()
 		return nil
 	}
@@ -114,7 +116,7 @@ func Run(args []string) error {
 func runWeb(port string, lan bool) error {
 	tmpl := template.Must(template.New("index").Parse(indexHTML))
 
-http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" {
 			tmpl.Execute(w, nil)
 			return
@@ -122,8 +124,7 @@ http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 
 		if r.Method == "POST" {
 			cmd := r.FormValue("command")
-			auto := r.FormValue("auto") == "on"
-
+			_ = r.FormValue("auto") == "on" // auto-confirm is implicit in Web mode
 			ag := agent.New(agent.Config{Yes: true}) // Web mode always auto-confirms
 			err := ag.Execute(cmd, false)
 
@@ -131,13 +132,29 @@ http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				out = err.Error()
 			} else {
-				// Get output from session
 				out = ag.GetOutput()
 			}
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{"output": out})
 			return
+		}
+	})
+
+	http.HandleFunc("/logs", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		cmd := exec.Command("journalctl", "-u", "eva", "-f", "-n", "50")
+		stdout, _ := cmd.StdoutPipe()
+		cmd.Start()
+		defer cmd.Process.Kill()
+
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			fmt.Fprintf(w, "data: %s\n\n", scanner.Text())
+			w.(http.Flusher).Flush()
 		}
 	})
 
@@ -162,9 +179,9 @@ http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 			for _, e := range entries {
 				info, _ := e.Info()
 				files = append(files, map[string]any{
-					"name": e.Name(),
+					"name":  e.Name(),
 					"isDir": e.IsDir(),
-					"size": info.Size(),
+					"size":  info.Size(),
 				})
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -194,7 +211,7 @@ http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 }
 
 func installService(port string) error {
-	exec, err := os.Executable()
+	execPath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("get executable: %w", err)
 	}
@@ -205,13 +222,14 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=%s -web -port %s
+ExecStart=%s -web -lan -port %s
 Restart=always
 RestartSec=5
+WorkingDirectory=%s
 
 [Install]
 WantedBy=multi-user.target
-`, exec, port)
+`, execPath, port, os.Getenv("PWD"))
 
 	path := "/etc/systemd/system/eva.service"
 	if err := os.WriteFile(path, []byte(service), 0644); err != nil {
@@ -219,7 +237,6 @@ WantedBy=multi-user.target
 	}
 
 	fmt.Printf("Service installed: %s\n", path)
-	fmt.Println("Run: sudo systemctl daemon-reload && sudo systemctl enable eva")
 	return nil
 }
 
@@ -247,103 +264,153 @@ var indexHTML = `
 <!DOCTYPE html>
 <html>
 <head>
-	<meta charset="UTF-8">
-	<title>EVA</title>
-	<style>
-		* { box-sizing: border-box }
-		body { font-family: system-ui; background: #1a1a2e; color: #eee; padding: 20px }
-		.container { max-width: 900px; margin: 0 auto }
-		h1 { color: #00d4ff; margin-bottom: 20px }
-		.tabs { display: flex; gap: 10px; margin-bottom: 20px }
-		.tab { padding: 10px 20px; background: #16213e; border: none; color: #fff; cursor: pointer; border-radius: 4px }
-		.tab.active { background: #00d4ff; color: #1a1a2e }
-		.cmd { width: 100%; padding: 15px; border-radius: 4px; border: none; margin-bottom: 10px }
-		button { padding: 12px 24px; border-radius: 4px; border: none; background: #00d4ff; color: #1a1a2e; cursor: pointer }
-		#output, #editor { background: #16213e; padding: 20px; border-radius: 4px; white-space: pre-wrap; margin-top: 20px; min-height: 200px; }
-		#output { display: none }
-		#editor { display: none; font-family: monospace; width: 100%; color: #fff; }
-		.files { display: grid; grid-template-columns: 1fr 1fr; gap: 10px }
-		.file { background: #16213e; padding: 10px; border-radius: 4px; cursor: pointer }
-		.file:hover { background: #1f2f4f }
-		.dir { color: #00d4ff }
-		.hidden { display: none }
-	</style>
+        <meta charset="UTF-8">
+        <title>EVA</title>
+        <style>
+                * { box-sizing: border-box }
+                body { font-family: system-ui; background: #1a1a2e; color: #eee; padding: 20px }
+                .container { max-width: 900px; margin: 0 auto }
+                h1 { color: #00d4ff; margin-bottom: 20px }
+                .tabs { display: flex; gap: 10px; margin-bottom: 20px }
+                .tab { padding: 10px 20px; background: #16213e; border: none; color: #fff; cursor: pointer; border-radius: 4px }
+                .tab.active { background: #00d4ff; color: #1a1a2e }
+                .cmd { width: 100%; padding: 15px; border-radius: 4px; border: none; margin-bottom: 10px }
+                button { padding: 12px 24px; border-radius: 4px; border: none; background: #00d4ff; color: #1a1a2e; cursor: pointer }
+                #output, #editor, #logs { background: #16213e; padding: 20px; border-radius: 4px; white-space: pre-wrap; margin-top: 20px; min-height: 200px; }
+                #output { display: none }
+                #logs { display: none; height: 300px; overflow-y: auto; font-family: monospace; font-size: 12px; border: 1px solid #333; }
+                #editor { display: none; font-family: monospace; width: 100%; color: #fff; }
+                .footer { margin-top: 40px; padding-top: 20px; border-top: 1px solid #333; display: flex; align-items: center; gap: 10px; }
+                
+                /* Switch Style */
+                .switch { position: relative; display: inline-block; width: 40px; height: 20px; }
+                .switch input { opacity: 0; width: 0; height: 0; }
+                .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #333; transition: .4s; border-radius: 20px; }
+                .slider:before { position: absolute; content: ""; height: 16px; width: 16px; left: 2px; bottom: 2px; background-color: white; transition: .4s; border-radius: 50%; }
+                input:checked + .slider { background-color: #00d4ff; }
+                input:checked + .slider:before { transform: translateX(20px); }
+                .hidden { display: none }
+                .files { display: grid; grid-template-columns: 1fr 1fr; gap: 10px }
+                .file { background: #16213e; padding: 10px; border-radius: 4px; cursor: pointer }
+                .file:hover { background: #1f2f4f }
+                .dir { color: #00d4ff }
+        </style>
 </head>
 <body>
-	<div class="container">
-		<h1>EVA 🤖</h1>
-		<div class="tabs">
-			<button class="tab active" data-tab="cmd">Command</button>
-			<button class="tab" data-tab="files">Files</button>
-		</div>
-		<div id="cmd-tab">
-			<form id="cmd-form">
-				<input class="cmd" name="command" placeholder="Type command..." autofocus>
-				<button>Run</button>
-			</form>
-			<label><input type="checkbox" name="auto"> Auto-confirm</label>
-			<div id="output"></div>
-		</div>
-		<div id="files-tab" class="hidden">
-			<button id="refresh-btn">Refresh</button>
-			<div id="path"></div>
-			<div class="files" id="files"></div>
-			<textarea id="editor" rows="20"></textarea>
-			<button id="save-btn" class="hidden">Save</button>
-		</div>
-	</div>
-	<script>
-		let currentPath = '.';
-		let currentFile = '';
-		document.querySelectorAll('.tab').forEach(t => {
-			t.addEventListener('click', () => {
-				document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
-				t.classList.add('active');
-				const tab = t.dataset.tab;
-				document.getElementById('cmd-tab').classList.toggle('hidden', tab !== 'cmd');
-				document.getElementById('files-tab').classList.toggle('hidden', tab !== 'files');
-				if (tab === 'files') loadFiles(currentPath);
-			});
-		});
-		document.getElementById('cmd-form').addEventListener('submit', async e => {
-			e.preventDefault();
-			const res = await fetch('/', { method: 'POST', body: new FormData(e.target) });
-			const data = await res.json();
-			document.getElementById('output').textContent = data.output;
-			document.getElementById('output').style.display = 'block';
-		});
-		async function loadFiles(path) {
-			currentPath = path;
-			const res = await fetch('/files/?path=' + encodeURIComponent(path));
-			const files = await res.json();
-			document.getElementById('path').textContent = path;
-			const es = document.getElementById('files');
-			es.innerHTML = '';
-			files.forEach(f => {
-				const d = document.createElement('div');
-				d.className = 'file' + (f.isDir ? ' dir' : '');
-				d.textContent = f.name;
-				d.onclick = () => { if (f.isDir) loadFiles(f.name); else openFile(f.name); };
-				es.appendChild(d);
-			});
-			document.getElementById('editor').style.display = 'none';
-			document.getElementById('save-btn').classList.add('hidden');
-		}
-		async function openFile(name) {
-			currentFile = name;
-			const res = await fetch('/files/?path=' + encodeURIComponent(name));
-			const content = await res.text();
-			document.getElementById('editor').value = content;
-			document.getElementById('editor').style.display = 'block';
-			document.getElementById('save-btn').classList.remove('hidden');
-		}
-		document.getElementById('save-btn').addEventListener('click', async () => {
-			const content = document.getElementById('editor').value;
-			await fetch('/files/', { method: 'POST', body: 'path=' + currentFile + '&content=' + encodeURIComponent(content) });
-			alert('Saved!');
-		});
-		document.getElementById('refresh-btn').addEventListener('click', () => loadFiles(currentPath));
-	</script>
+        <div class="container">
+                <h1>EVA 🤖</h1>
+                <div class="tabs">
+                        <button class="tab active" data-tab="cmd">Command</button>
+                        <button class="tab" data-tab="files">Files</button>
+                </div>
+                <div id="cmd-tab">
+                        <form id="cmd-form">
+                                <input class="cmd" name="command" placeholder="Type command..." autofocus>
+                                <button>Run</button>
+                        </form>
+                        <label><input type="checkbox" name="auto"> Auto-confirm</label>
+                        <div id="output"></div>
+                </div>
+                <div id="files-tab" class="hidden">
+                        <button id="refresh-btn">Refresh</button>
+                        <div id="path"></div>
+                        <div class="files" id="files"></div>
+                        <textarea id="editor" rows="20"></textarea>
+                        <button id="save-btn" class="hidden">Save</button>
+                </div>
+
+                <div id="logs"></div>
+
+                <div class="footer">
+                        <span>Mostrar logs</span>
+                        <label class="switch">
+                                <input type="checkbox" id="log-toggle">
+                                <span class="slider"></span>
+                        </label>
+                </div>
+        </div>
+        <script>
+                let currentPath = '.';
+                let currentFile = '';
+                let logSource = null;
+
+                document.getElementById('log-toggle').addEventListener('change', e => {
+                        const logs = document.getElementById('logs');
+                        if (e.target.checked) {
+                                logs.style.display = 'block';
+                                startLogs();
+                        } else {
+                                logs.style.display = 'none';
+                                stopLogs();
+                        }
+                });
+
+                function startLogs() {
+                        if (logSource) return;
+                        logSource = new EventSource('/logs');
+                        logSource.onmessage = e => {
+                                const logs = document.getElementById('logs');
+                                logs.textContent += e.data + '\n';
+                                logs.scrollTop = logs.scrollHeight;
+                        };
+                }
+
+                function stopLogs() {
+                        if (logSource) {
+                                logSource.close();
+                                logSource = null;
+                        }
+                }
+
+                document.querySelectorAll('.tab').forEach(t => {
+                        t.addEventListener('click', () => {
+                                document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+                                t.classList.add('active');
+                                const tab = t.dataset.tab;
+                                document.getElementById('cmd-tab').classList.toggle('hidden', tab !== 'cmd');
+                                document.getElementById('files-tab').classList.toggle('hidden', tab !== 'files');
+                                if (tab === 'files') loadFiles(currentPath);
+                        });
+                });
+                document.getElementById('cmd-form').addEventListener('submit', async e => {
+                        e.preventDefault();
+                        const res = await fetch('/', { method: 'POST', body: new FormData(e.target) });
+                        const data = await res.json();
+                        document.getElementById('output').textContent = data.output;
+                        document.getElementById('output').style.display = 'block';
+                });
+                async function loadFiles(path) {
+                        currentPath = path;
+                        const res = await fetch('/files/?path=' + encodeURIComponent(path));
+                        const files = await res.json();
+                        document.getElementById('path').textContent = path;
+                        const es = document.getElementById('files');
+                        es.innerHTML = '';
+                        files.forEach(f => {
+                                const d = document.createElement('div');
+                                d.className = 'file' + (f.isDir ? ' dir' : '');
+                                d.textContent = f.name;
+                                d.onclick = () => { if (f.isDir) loadFiles(f.name); else openFile(f.name); };
+                                es.appendChild(d);
+                        });
+                        document.getElementById('editor').style.display = 'none';
+                        document.getElementById('save-btn').classList.add('hidden');
+                }
+                async function openFile(name) {
+                        currentFile = name;
+                        const res = await fetch('/files/?path=' + encodeURIComponent(name));
+                        const content = await res.text();
+                        document.getElementById('editor').value = content;
+                        document.getElementById('editor').style.display = 'block';
+                        document.getElementById('save-btn').classList.remove('hidden');
+                }
+                document.getElementById('save-btn').addEventListener('click', async () => {
+                        const content = document.getElementById('editor').value;
+                        await fetch('/files/', { method: 'POST', body: 'path=' + currentFile + '&content=' + encodeURIComponent(content) });
+                        alert('Saved!');
+                });
+                document.getElementById('refresh-btn').addEventListener('click', () => loadFiles(currentPath));
+        </script>
 </body>
 </html>`
 
