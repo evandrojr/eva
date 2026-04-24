@@ -453,6 +453,7 @@ func executeCommand(cmd Command) error {
 }
 
 func execBash(cmd string) error {
+	fmt.Printf("\033[33m$ %s\033[0m\n", cmd)
 	execCmd := exec.Command("bash", "-c", cmd)
 	execCmd.Stdout = os.Stdout
 	execCmd.Stderr = os.Stderr
