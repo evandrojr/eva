@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html>
+<head>
+        <meta charset="UTF-8">
+        <title>EVA</title>
+        <style>
+                * { box-sizing: border-box; margin: 0; padding: 0; }
+                body { font-family: system-ui; background: #0f0f1a; color: #eee; padding: 20px; min-height: 100vh; }
+                .container { max-width: 1000px; margin: 0 auto }
+                h1 { color: #00d4ff; margin-bottom: 20px; font-size: 28px; }
+                .tabs { display: flex; gap: 8px; margin-bottom: 20px; }
+                .tab { padding: 10px 24px; background: #1a1a2e; border: 1px solid #2a2a4e; color: #888; cursor: pointer; border-radius: 8px; font-size: 14px; transition: all 0.2s; }
+                .tab:hover { border-color: #00d4ff; color: #fff; }
+                .tab.active { background: #00d4ff; color: #0f0f1a; border-color: #00d4ff; }
+                .cmd { width: 100%; padding: 14px 16px; border-radius: 8px; border: 1px solid #2a2a4e; margin-bottom: 12px; font-size: 15px; outline: none; transition: border-color 0.2s; }
+                .cmd:focus { border-color: #00d4ff; }
+                .cmd-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+                .cmd-row input[name="command"] { flex: 1; margin-bottom: 0; }
+                .cmd-row label { display: flex; align-items: center; gap: 6px; font-size: 14px; color: #888; cursor: pointer; }
+                button { padding: 12px 28px; border-radius: 8px; border: none; background: #00d4ff; color: #0f0f1a; cursor: pointer; font-weight: 600; font-size: 14px; transition: all 0.2s; }
+                button:hover { background: #00b8e6; transform: translateY(-1px); }
+                button:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+                #ai-messages { background: #1a1a2e; padding: 16px; border-radius: 8px; margin-bottom: 16px; min-height: 200px; max-height: 350px; overflow-y: auto; font-family: monospace; font-size: 13px; border: 1px solid #2a2a4e; }
+                .ai-user { color: #00d4ff; font-weight: 600; margin-bottom: 8px; }
+                .ai-assistant { color: #a8d4a8; white-space: pre-wrap; line-height: 1.5; }
+                .log-section { background: #1a1a2e; border: 1px solid #2a2a4e; border-radius: 8px; padding: 16px; margin-bottom: 12px; }
+                .log-header { display: flex; align-items: center; gap: 24px; margin-bottom: 12px; flex-wrap: wrap; }
+                .log-header span { font-size: 13px; color: #888; }
+                .switch { position: relative; display: inline-block; width: 36px; height: 18px; }
+                .switch input { opacity: 0; width: 0; height: 0; }
+                .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #333; transition: .3s; border-radius: 18px; }
+                .slider:before { position: absolute; content: ""; height: 14px; width: 14px; left: 2px; bottom: 2px; background-color: white; transition: .3s; border-radius: 50%; }
+                input:checked + .slider { background-color: #00d4ff; }
+                input:checked + .slider:before { transform: translateX(18px); }
+                .hidden { display: none }
+                .log-box { background: #0f0f1a; padding: 12px; border-radius: 6px; font-family: monospace; font-size: 12px; color: #fff; min-height: 100px; max-height: 200px; overflow-y: auto; border: 1px solid #2a2a4e; white-space: pre-wrap; }
+                .files { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; margin-top: 12px; }
+                .file { background: #1a1a2e; padding: 10px 14px; border-radius: 6px; cursor: pointer; border: 1px solid #2a2a4e; transition: all 0.2s; font-size: 14px; }
+                .file:hover { border-color: #00d4ff; }
+                .file.dir { color: #00d4ff; }
+                #path { font-size: 14px; color: #888; margin: 12px 0; }
+                #editor { display: none; font-family: monospace; width: 100%; background: #1a1a2e; color: #fff; border: 1px solid #2a2a4e; border-radius: 8px; padding: 16px; margin-top: 12px; font-size: 13px; }
+                .settings-section { background: #1a1a2e; border: 1px solid #2a2a4e; border-radius: 8px; padding: 20px; margin-bottom: 16px; }
+                .settings-section h3 { font-size: 14px; color: #00d4ff; margin-bottom: 12px; text-transform: uppercase; letter-spacing: 1px; }
+                .settings-section input[type="text"] { width: 100%; padding: 10px 14px; border-radius: 6px; border: 1px solid #2a2a4e; margin-bottom: 10px; font-size: 14px; outline: none; }
+                .settings-section input:focus { border-color: #00d4ff; }
+                .perm-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+                .perm-grid label { display: flex; align-items: center; gap: 6px; background: #0f0f1a; padding: 8px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; border: 1px solid #2a2a4e; transition: all 0.2s; }
+                .perm-grid label:hover { border-color: #00d4ff; }
+                .perm-grid input:checked + span { color: #00d4ff; }
+                #save-btn { background: #2a2a4e; color: #fff; margin-top: 12px; }
+                #save-btn:hover { background: #3a3a5e; }
+                input[type="checkbox"] { accent-color: #00d4ff; width: 16px; height: 16px; }
+        </style>
+</head>
+<body>
+        <div class="container">
+                <h1>EVA 🤖</h1>
+                <div class="tabs">
+                        <button class="tab active" data-tab="cmd">Command + AI</button>
+                        <button class="tab" data-tab="files">Files</button>
+                        <button class="tab" data-tab="settings">Settings</button>
+                </div>
+
+                <div id="cmd-tab">
+                        <div id="ai-messages"></div>
+                        <form id="cmd-form">
+                                <div class="cmd-row">
+                                        <input class="cmd" name="command" placeholder="Type command..." autofocus>
+                                        <button type="submit">Run</button>
+                                        <label><input type="checkbox" name="auto"><span>Auto-confirm</span></label>
+                                </div>
+                        </form>
+                        <div class="log-section">
+                                <div class="log-header">
+                                        <span>Logs</span>
+                                        <span>EVA</span>
+                                        <label class="switch">
+                                                <input type="checkbox" id="log-toggle">
+                                                <span class="slider"></span>
+                                        </label>
+                                        <span>AI Gateway</span>
+                                        <label class="switch">
+                                                <input type="checkbox" id="gwlog-toggle">
+                                                <span class="slider"></span>
+                                        </label>
+                                </div>
+                                <div id="logs" class="log-box" style="display:none"></div>
+                                <div id="gateway-logs" class="log-box" style="display:none"></div>
+                        </div>
+                </div>
+
+                <div id="files-tab" class="hidden">
+                        <button id="refresh-btn">Refresh</button>
+                        <div id="path">.</div>
+                        <div class="files" id="files"></div>
+                        <textarea id="editor" rows="20" placeholder="File content..."></textarea>
+                        <button id="save-btn" class="hidden">Save</button>
+                </div>
+
+                <div id="settings-tab" class="hidden">
+                        <div class="settings-section">
+                                <h3>Model</h3>
+                                <input class="cmd" id="settings-model" placeholder="e.g. opencode, gpt-4o, claude-3-5-sonnet-20241022">
+                        </div>
+                        <div class="settings-section">
+                                <h3>Gateway</h3>
+                                <input type="text" id="settings-gateway" placeholder="http://localhost:1313/v1/chat/completions">
+                        </div>
+                        <div class="settings-section">
+                                <h3>Firecrawl API Key</h3>
+                                <input type="text" id="settings-firecrawl" placeholder="fc-...">
+                        </div>
+                        <div class="settings-section">
+                                <h3>Permissions</h3>
+                                <div class="perm-grid">
+                                        <label><input type="checkbox" id="perm-internet"><span>Internet</span></label>
+                                        <label><input type="checkbox" id="perm-read"><span>Ler Arquivos</span></label>
+                                        <label><input type="checkbox" id="perm-write"><span>Escrever</span></label>
+                                        <label><input type="checkbox" id="perm-delete"><span>Apagar</span></label>
+                                        <label><input type="checkbox" id="perm-exec"><span>Executar Shell</span></label>
+                                        <label><input type="checkbox" id="perm-root"><span>Root</span></label>
+                                        <label><input type="checkbox" id="perm-verbose"><span>Verbose</span></label>
+                                </div>
+                        </div>
+                        <button id="save-settings-btn">Save Settings</button>
+                </div>
+        </div>
+
+        <script>
+                let currentPath = '.';
+                let currentFile = '';
+                let logSource = null;
+                let gwLogSource = null;
+
+                document.getElementById('log-toggle').addEventListener('change', e => {
+                        const logs = document.getElementById('logs');
+                        if (e.target.checked) {
+                                logs.style.display = 'block';
+                                startLogs();
+                        } else {
+                                logs.style.display = 'none';
+                                stopLogs();
+                        }
+                });
+
+                function startLogs() {
+                        if (logSource) return;
+                        logSource = new EventSource('/logs');
+                        logSource.onmessage = e => {
+                                document.getElementById('logs').textContent += e.data + '\n';
+                                document.getElementById('logs').scrollTop = document.getElementById('logs').scrollHeight;
+                        };
+                }
+
+                function stopLogs() {
+                        if (logSource) { logSource.close(); logSource = null; }
+                }
+
+                document.getElementById('gwlog-toggle').addEventListener('change', e => {
+                        const gwLogs = document.getElementById('gateway-logs');
+                        if (e.target.checked) {
+                                gwLogs.style.display = 'block';
+                                startGwLogs();
+                        } else {
+                                gwLogs.style.display = 'none';
+                                stopGwLogs();
+                        }
+                });
+
+                function startGwLogs() {
+                        if (gwLogSource) return;
+                        gwLogSource = new EventSource('/gwlogs');
+                        gwLogSource.onmessage = e => {
+                                document.getElementById('gateway-logs').textContent += e.data + '\n';
+                                document.getElementById('gateway-logs').scrollTop = document.getElementById('gateway-logs').scrollHeight;
+                        };
+                }
+
+                function stopGwLogs() {
+                        if (gwLogSource) { gwLogSource.close(); gwLogSource = null; }
+                }
+
+                document.querySelectorAll('.tab').forEach(t => {
+                        t.addEventListener('click', () => {
+                                document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+                                t.classList.add('active');
+                                const tab = t.dataset.tab;
+                                document.getElementById('cmd-tab').classList.toggle('hidden', tab !== 'cmd');
+                                document.getElementById('files-tab').classList.toggle('hidden', tab !== 'files');
+                                document.getElementById('settings-tab').classList.toggle('hidden', tab !== 'settings');
+                                if (tab === 'files') loadFiles(currentPath);
+                        });
+                });
+
+                document.getElementById('cmd-form').addEventListener('submit', async e => {
+                        e.preventDefault();
+                        const btn = e.target.querySelector('button');
+                        const input = e.target.querySelector('input[name="command"]').value;
+                        btn.disabled = true;
+                        btn.textContent = 'Running...';
+                        const formData = new FormData(e.target);
+                        ['model','gateway','firecrawl'].forEach(k => {
+                                const v = localStorage.getItem('eva_'+k);
+                                if (v) formData.append(k, v);
+                        });
+                        ['internet','read','write','delete','exec','root','verbose'].forEach(k => {
+                                formData.append('perm_'+k, localStorage.getItem('eva_perm_'+k) || 'false');
+                        });
+                        try {
+                                const res = await fetch('/', { method: 'POST', body: formData });
+                                const data = await res.json();
+                                const aiMsgs = document.getElementById('ai-messages');
+                                aiMsgs.innerHTML += '<div class="ai-user">User: ' + input + '</div>';
+                                aiMsgs.innerHTML += '<div class="ai-assistant">' + data.output.replace(/\x1b\[[0-9;]*m/g, '') + '</div>';
+                                aiMsgs.scrollTop = aiMsgs.scrollHeight;
+                                e.target.querySelector('input').value = '';
+                        } finally {
+                                btn.disabled = false;
+                                btn.textContent = 'Run';
+                        }
+                });
+
+                async function loadFiles(path) {
+                        currentPath = path;
+                        const res = await fetch('/files/?path=' + encodeURIComponent(path));
+                        const files = await res.json();
+                        document.getElementById('path').textContent = path;
+                        const es = document.getElementById('files');
+                        es.innerHTML = '';
+                        files.forEach(f => {
+                                const d = document.createElement('div');
+                                d.className = 'file' + (f.isDir ? ' dir' : '');
+                                d.textContent = f.name;
+                                d.onclick = () => { if (f.isDir) loadFiles(f.name); else openFile(f.name); };
+                                es.appendChild(d);
+                        });
+                        document.getElementById('editor').style.display = 'none';
+                        document.getElementById('save-btn').classList.add('hidden');
+                }
+
+                async function openFile(name) {
+                        currentFile = name;
+                        const res = await fetch('/files/?path=' + encodeURIComponent(name));
+                        document.getElementById('editor').value = await res.text();
+                        document.getElementById('editor').style.display = 'block';
+                        document.getElementById('save-btn').classList.remove('hidden');
+                }
+
+                document.getElementById('save-btn').addEventListener('click', async () => {
+                        await fetch('/files/', { method: 'POST', body: 'path=' + currentFile + '&content=' + encodeURIComponent(document.getElementById('editor').value) });
+                        alert('Saved!');
+                });
+                document.getElementById('refresh-btn').addEventListener('click', () => loadFiles(currentPath));
+
+                async function loadServerConfig() {
+                        try {
+                                const res = await fetch('/config');
+                                const cfg = await res.json();
+                                ['firecrawl','model','gateway'].forEach(k => {
+                                        if (!localStorage.getItem('eva_'+k) && cfg[k]) {
+                                                document.getElementById('settings-'+k).value = cfg[k];
+                                                localStorage.setItem('eva_'+k, cfg[k]);
+                                        }
+                                });
+                                ['internet','read','write','delete','exec','root','verbose'].forEach(k => {
+                                        const id = 'perm-'+k;
+                                        if (!localStorage.getItem('eva_perm_'+k) && cfg['perm_'+k]) {
+                                                document.getElementById(id).checked = cfg['perm_'+k];
+                                                localStorage.setItem('eva_perm_'+k, cfg['perm_'+k]);
+                                        }
+                                });
+                        } catch(e) {}
+                }
+                loadServerConfig();
+
+                ['model','gateway','firecrawl'].forEach(k => {
+                        const v = localStorage.getItem('eva_'+k);
+                        if (v) document.getElementById('settings-'+k).value = v;
+                });
+                ['internet','read','write','delete','exec','root','verbose'].forEach(k => {
+                        if (localStorage.getItem('eva_perm_'+k) === 'true') document.getElementById('perm-'+k).checked = true;
+                });
+
+                document.getElementById('save-settings-btn').addEventListener('click', () => {
+                        const formData = new FormData();
+                        ['model','gateway','firecrawl'].forEach(k => {
+                                const v = document.getElementById('settings-'+k).value;
+                                if (v) localStorage.setItem('eva_'+k, v);
+                                formData.append(k, v);
+                        });
+                        ['internet','read','write','delete','exec','root','verbose'].forEach(k => {
+                                const v = document.getElementById('perm-'+k).checked;
+                                localStorage.setItem('eva_perm_'+k, v);
+                                formData.append('perm_'+k, v);
+                        });
+                        fetch('/config/save', { method: 'POST', body: formData });
+                        alert('Settings saved!');
+                });
+        </script>
+</body>
+</html>

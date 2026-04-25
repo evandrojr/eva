@@ -81,6 +81,7 @@ type Config struct {
 	PermDelete bool
 	PermExec   bool
 	PermRoot   bool
+	Verbose    bool
 }
 
 type Message struct {
@@ -125,6 +126,13 @@ func (a *Agent) writeOutput(format string, args ...any) {
 	s := fmt.Sprintf(format, args...)
 	a.output.WriteString(s)
 	fmt.Print(s)
+}
+
+func (a *Agent) verbose(format string, args ...any) {
+	if a.cfg.Verbose {
+		s := fmt.Sprintf(format, args...)
+		fmt.Print(s)
+	}
 }
 
 func (a *Agent) loadSession() {
@@ -486,6 +494,8 @@ func (a *Agent) sendRequest(reqBody map[string]any) ([]byte, error) {
 		gatewayURL = a.cfg.Gateway
 	}
 
+	a.verbose("→ POST %s\n%s\n", gatewayURL, string(jsonData))
+
 	httpReq, err := http.NewRequest("POST", gatewayURL, bytes.NewReader(jsonData))
 	if err != nil {
 		return nil, err
@@ -503,6 +513,8 @@ func (a *Agent) sendRequest(reqBody map[string]any) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	a.verbose("← %d %s\n", resp.StatusCode, string(body))
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("gateway returned %d: %s", resp.StatusCode, string(body))
