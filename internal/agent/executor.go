@@ -3,6 +3,7 @@ package agent
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,9 +12,11 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
+	"github.com/chromedp/chromedp"
 	"github.com/peterh/liner"
 )
 
@@ -49,16 +52,27 @@ const GatewayURL = "http://localhost:1313/v1/chat/completions"
 
 type Config struct {
 	Model       string
-	Session     bool
+	Gateway    string
+	FirecrawlKey string
+	Session    bool
 	SessionPath string
-	Yes         bool
+	Yes        bool
 	Interactive bool
+	PermInternet bool
+	PermRead   bool
+	PermWrite  bool
+	PermDelete bool
+	PermExec   bool
+	PermRoot   bool
 }
 
 type Message struct {
-	Role      string      `json:"role"`
-	Content   string      `json:"content,omitempty"`
-	ToolCalls []ToolCall  `json:"tool_calls,omitempty"`
+	Role               string      `json:"role"`
+	Content            string      `json:"content,omitempty"`
+	ToolCalls          []ToolCall  `json:"tool_calls,omitempty"`
+	ToolCallID         string     `json:"tool_call_id,omitempty"`
+	ToolCallFunction  string     `json:"tool_call_function,omitempty"`
+	ToolCallResult    string     `json:"tool_call_result,omitempty"`
 }
 
 type ToolCall struct {
@@ -82,6 +96,9 @@ func New(cfg Config) *Agent {
 	a := &Agent{cfg: cfg, messages: []Message{}, output: bytes.Buffer{}}
 	if cfg.Session {
 		a.loadSession()
+	}
+	if os.Getenv("FIRECRAWL_API_KEY") == "" && a.cfg.FirecrawlKey == "" {
+		fmt.Fprintf(os.Stderr, "\n\033[33m⚠ FIRECRAWL_API_KEY not set. Web search will not work via CLI.\n  Set it with: export FIRECRAWL_API_KEY=your-key\033[0m\n\n")
 	}
 	return a
 }
@@ -139,14 +156,42 @@ var tools = []map[string]any{
 	{
 		"type": "function",
 		"function": map[string]any{
+			"name":        "get_time",
+			"description": "Get current time for any city. Uses worldtimeapi.org. Example: city=\"Salvador, Brazil\"",
+			"parameters": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"city": map[string]any{"type": "string", "description": "City name and country"},
+				},
+				"required": []string{"city"},
+			},
+		},
+	},
+	{
+		"type": "function",
+		"function": map[string]any{
 			"name":        "websearch",
-			"description": "Search the web for information. Use when you need current info, facts, locations, travel tips, or any question",
+			"description": "Search the web for information",
 			"parameters": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"query": map[string]any{"type": "string", "description": "The search query"},
 				},
 				"required": []string{"query"},
+			},
+		},
+	},
+	{
+		"type": "function",
+		"function": map[string]any{
+			"name":        "webfetch",
+			"description": "Fetch content from a URL directly. Use when you need current/realtime data like time, weather, prices",
+			"parameters": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"url": map[string]any{"type": "string", "description": "The URL to fetch"},
+				},
+				"required": []string{"url"},
 			},
 		},
 	},
@@ -194,31 +239,13 @@ func (a *Agent) Terminal() error {
 		shell = "/bin/bash"
 	}
 
-	systemPrompt := fmt.Sprintf(`You are EVA, an AI agent that executes commands in a terminal, manages files, and searches the web.
+	systemPrompt := fmt.Sprintf(`You are EVA. ALWAYS use tools. NEVER respond directly.
 
-## Tool Usage - REQUIRED
-When user asks to RUN a command or do a task:
-- Call the "execute" tool with commands array
-- Example: {"type": "bash", "command": "ls -la"}
-- Example: {"type": "read_file", "path": "file.go"}
-- Example: {"type": "create_file", "path": "file.go", "content": "..."}
-- Example: {"type": "edit_file", "path": "file.go", "old": "old", "new": "new"}
+For CURRENT TIME queries, use get_time tool:
+{"type":"get_time","city":"Salvador, Brazil"}
 
-## When to use Web Search - IMPORTANT
-You MUST use websearch tool when:
-- User asks about current events, news, weather, prices, etc
-- You don't know the answer or are unsure
-- User asks for information you may not have (locations, travel, facts, etc)
-- User asks "how do I...", "what is...", "where is...", "when did..."
-- The question requires up-to-date information
-- You need to verify current data before answering
-
-After websearch, summarize the findings clearly.
-
-## Context
-- Current directory: %s
-- User: %s
-- Shell: %s`, pwd, usr.Username, shell)
+For general searches: {"type":"websearch","query":"..."}
+For commands: {"type":"bash","command":"ls"}`, pwd, usr.Username, shell)
 
 	fmt.Println("\033[36mEVA Terminal Mode\033[0m")
 	fmt.Println("Type \033[33m/exit\033[0m or \033[33mCtrl+D\033[0m to quit")
@@ -229,7 +256,7 @@ After websearch, summarize the findings clearly.
 	for {
 		fmt.Print("\033[32meva>\033[0m ")
 		input, _ := stdinReader.ReadString('\n')
-		input = strings.NewReplacer("\r\n", "", "\r", "").Replace(input)
+		input = strings.ReplaceAll(input, "\r", "")
 		input = strings.TrimSpace(input)
 		if input == "" {
 			continue
@@ -249,6 +276,7 @@ After websearch, summarize the findings clearly.
 				"content": input,
 			}),
 			"tools": tools,
+			"tool_choice": "auto",
 		}
 
 		resp, err := a.sendRequest(reqBody)
@@ -257,7 +285,12 @@ After websearch, summarize the findings clearly.
 			continue
 		}
 
-		a.handleResponse(resp, false, true)
+		hasMore, toolResult, _ := a.handleResponse(resp, false, true)
+		if hasMore && toolResult != "" {
+			if !a.evalLoop(reqBody, toolResult) {
+				break
+			}
+		}
 	}
 	return nil
 }
@@ -274,30 +307,13 @@ func (a *Agent) Interactive() error {
 		shell = "/bin/bash"
 	}
 
-	systemPrompt := fmt.Sprintf(`You are EVA, an AI agent that executes commands in a terminal, manages files, and searches the web.
+	systemPrompt := fmt.Sprintf(`You are EVA. ALWAYS use tools. NEVER respond directly.
 
-## Tool Usage - REQUIRED
-When user asks to RUN a command or do a task:
-- Call the "execute" tool with commands array
-- Example: {"type": "bash", "command": "ls -la"}
-- Example: {"type": "read_file", "path": "file.go"}
-- Example: {"type": "create_file", "path": "file.go", "content": "..."}
-- Example: {"type": "edit_file", "path": "file.go", "old": "old", "new": "new"}
-- Example: {"type": "update_kanban", "task": "task", "status": "todo"}
+For CURRENT TIME queries, use get_time tool:
+{"type":"get_time","city":"Salvador, Brazil"}
 
-## When to use Web Search - IMPORTANT
-You MUST use websearch tool when:
-- User asks about current events, news, weather, prices, etc
-- You don't know the answer or are unsure
-- User asks for information you may not have (locations, travel, facts, etc)
-- User asks "how do I...", "what is...", "where is...", "when did..."
-- The question requires up-to-date information
-- You need to verify current data before answering
-
-## Context
-- Current directory: %s
-- User: %s
-- Shell: %s`, pwd, usr.Username, shell)
+For general searches: {"type":"websearch","query":"..."}
+For commands: {"type":"bash","command":"ls"}`, pwd, usr.Username, shell)
 
 	var prompt func(string) string
 
@@ -344,7 +360,7 @@ You MUST use websearch tool when:
 
 	for {
 		input := prompt("\033[32meva>\033[0m ")
-		input = strings.NewReplacer("\r\n", "", "\r", "").Replace(input)
+		input = strings.ReplaceAll(input, "\r", "")
 		input = strings.TrimSpace(input)
 		if input == "" {
 			continue
@@ -364,6 +380,7 @@ You MUST use websearch tool when:
 				"content": input,
 			}),
 			"tools":   tools,
+			"tool_choice": "auto",
 		}
 
 		resp, err := a.sendRequest(reqBody)
@@ -374,8 +391,12 @@ You MUST use websearch tool when:
 
 		a.messages = append(a.messages, Message{Role: "user", Content: input})
 
-		if err := a.handleResponse(resp, true, a.cfg.Yes); err != nil {
+		if hasMore, toolResult, err := a.handleResponse(resp, true, a.cfg.Yes); err != nil {
 			fmt.Printf("\033[31mError: %v\033[0m\n", err)
+		} else if hasMore && toolResult != "" {
+			if !a.evalLoop(reqBody, toolResult) {
+				break
+			}
 		}
 	}
 
@@ -391,32 +412,13 @@ func (a *Agent) Execute(task string, interactive bool) error {
 		shell = "/bin/bash"
 	}
 
-	systemPrompt := fmt.Sprintf(`You are EVA, an AI agent that executes commands in a terminal, manages files, and searches the web.
+	systemPrompt := fmt.Sprintf(`You are EVA. ALWAYS use tools. NEVER respond directly.
 
-## Tool Usage - REQUIRED
-When user asks to RUN a command or do a task:
-- Call the "execute" tool with commands array
-- Example: {"type": "bash", "command": "ls -la"}
-- Example: {"type": "read_file", "path": "file.go"}
-- Example: {"type": "create_file", "path": "file.go", "content": "..."}
-- Example: {"type": "edit_file", "path": "file.go", "old": "old", "new": "new"}
+For CURRENT TIME queries, use get_time tool:
+{"type":"get_time","city":"Salvador, Brazil"}
 
-## When to use Web Search - IMPORTANT
-You MUST use websearch tool when:
-- User asks about current events, news, weather, prices, etc
-- You don't know the answer or are unsure
-- User asks for information you may not have (locations, travel, facts, etc)
-- User asks "how do I...", "what is...", "where is...", "when did..."
-- The question requires up-to-date information
-- You need to verify current data before answering
-
-## Context
-- Current directory: %s
-- User: %s
-- Shell: %s
-
-## Task
-%s`, pwd, usr.Username, shell, task)
+For general searches: {"type":"websearch","query":"..."}
+For commands: {"type":"bash","command":"ls"}`, pwd, usr.Username, shell)
 
 	reqBody := map[string]any{
 		"model": a.cfg.Model,
@@ -425,6 +427,7 @@ You MUST use websearch tool when:
 			{"role": "user", "content": task},
 		},
 		"tools":      tools,
+		"tool_choice": "auto",
 	}
 
 	maxIterations := 5
@@ -434,8 +437,17 @@ You MUST use websearch tool when:
 			return fmt.Errorf("gateway request failed: %w", err)
 		}
 
-		if err := a.handleResponse(resp, true, a.cfg.Yes); err != nil {
+		hasMore, toolResult, err := a.handleResponse(resp, true, a.cfg.Yes)
+		if err != nil {
 			return err
+		}
+
+		if !hasMore || toolResult == "" {
+			break
+		}
+
+		if !a.evalLoop(reqBody, toolResult) {
+			break
 		}
 
 		if len(a.messages) == 0 {
@@ -455,7 +467,12 @@ func (a *Agent) sendRequest(reqBody map[string]any) ([]byte, error) {
 		return nil, err
 	}
 
-	httpReq, err := http.NewRequest("POST", GatewayURL, bytes.NewReader(jsonData))
+	gatewayURL := GatewayURL
+	if a.cfg.Gateway != "" {
+		gatewayURL = a.cfg.Gateway
+	}
+
+	httpReq, err := http.NewRequest("POST", gatewayURL, bytes.NewReader(jsonData))
 	if err != nil {
 		return nil, err
 	}
@@ -480,35 +497,94 @@ func (a *Agent) sendRequest(reqBody map[string]any) ([]byte, error) {
 	return body, nil
 }
 
-func (a *Agent) handleResponse(data []byte, interactive, autoConfirm bool) error {
+func (a *Agent) handleResponse(data []byte, interactive, autoConfirm bool) (bool, string, error) {
 	var resp map[string]any
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return fmt.Errorf("parse error: %w", err)
+		return false, "", fmt.Errorf("parse error: %w", err)
 	}
 
 	choices, ok := resp["choices"].([]any)
 	if !ok || len(choices) == 0 {
-		return fmt.Errorf("no response")
+		return false, "", fmt.Errorf("no response")
 	}
 
 	choice := choices[0].(map[string]any)
 	msg, ok := choice["message"].(map[string]any)
 	if !ok {
-		return fmt.Errorf("no message")
+		return false, "", fmt.Errorf("no message")
 	}
 
 	tc, hasTC := msg["tool_calls"]
 	if hasTC {
 		toolCalls := tc.([]any)
 		if len(toolCalls) == 0 {
-			return fmt.Errorf("no tool calls")
+			return false, "", fmt.Errorf("no tool calls")
 		}
 
 		tc0 := toolCalls[0].(map[string]any)
 		fn := tc0["function"].(map[string]any)
 		fnName := fn["name"].(string)
 
+		if fnName == "get_time" {
+			city := ""
+			switch arg := fn["arguments"].(type) {
+			case string:
+				var args map[string]any
+				json.Unmarshal([]byte(arg), &args)
+				if c, ok := args["city"].(string); ok {
+					city = c
+				}
+			case map[string]any:
+				if c, ok := fn["arguments"].(map[string]any)["city"].(string); ok {
+					city = c
+				}
+			}
+
+			cityURL := map[string]string{
+				"salvador": "brazil/salvador",
+				"sao paulo": "brazil/sao-paulo",
+				"new york": "usa/new-york",
+				"london": "uk/london",
+				"tokyo": "japan/tokyo",
+			}
+
+			urlPath := cityURL[strings.ToLower(city)]
+			if urlPath == "" {
+				urlPath = "brazil/salvador"
+			}
+
+			toolResult := a.fetchWithBrowser("https://www.timeanddate.com/worldclock/" + urlPath)
+			a.writeOutput("\033[36m%s\033[0m\n", toolResult)
+
+			toolCallID := tc0["id"].(string)
+			argsStr, _ := fn["arguments"].(string)
+			a.messages = append(a.messages, Message{
+				Role:               "assistant",
+				ToolCalls:          []ToolCall{{ID: toolCallID, Type: "function", Function: ToolFunction{Name: "get_time", Arguments: argsStr}}},
+				ToolCallID:         toolCallID,
+				ToolCallFunction:  "get_time",
+				ToolCallResult:    toolResult,
+			})
+			return true, toolResult, nil
+		}
+
 		if fnName == "websearch" {
+			if !a.cfg.PermInternet {
+				toolResult := "Internet access not allowed"
+				a.writeOutput("\033[31m%s\033[0m\n", toolResult)
+				if interactive {
+					toolCallID := tc0["id"].(string)
+					argsStr, _ := fn["arguments"].(string)
+					a.messages = append(a.messages, Message{
+						Role:               "assistant",
+						ToolCalls:          []ToolCall{{ID: toolCallID, Type: "function", Function: ToolFunction{Name: "websearch", Arguments: argsStr}}},
+						ToolCallID:         toolCallID,
+						ToolCallFunction:  "websearch",
+						ToolCallResult:    toolResult,
+					})
+				}
+				return true, toolResult, nil
+			}
 			query := ""
 			switch a := fn["arguments"].(type) {
 			case string:
@@ -523,37 +599,59 @@ func (a *Agent) handleResponse(data []byte, interactive, autoConfirm bool) error
 				}
 			}
 			results, err := a.doWebSearch(query)
+			toolResult := ""
 			if err != nil {
+				toolResult = fmt.Sprintf("Error: %v", err)
 				a.writeOutput("\033[31mSearch error: %v\033[0m\n", err)
 			} else {
+				toolResult = results
 				a.writeOutput("\033[36m%s\033[0m\n", results)
 			}
-			return nil
+			toolCallID := tc0["id"].(string)
+			argsStr, _ := fn["arguments"].(string)
+			a.messages = append(a.messages, Message{
+				Role:               "assistant",
+				ToolCalls:          []ToolCall{{ID: toolCallID, Type: "function", Function: ToolFunction{Name: "websearch", Arguments: argsStr}}},
+				ToolCallID:         toolCallID,
+				ToolCallFunction:  "websearch",
+				ToolCallResult:    toolResult,
+			})
+			return true, toolResult, nil
 		}
-		/*
-		if fnName == "websearch" {
-			query := ""
-			switch a := fn["arguments"].(type) {
+		if fnName == "webfetch" {
+			url := ""
+			switch arg := fn["arguments"].(type) {
 			case string:
 				var args map[string]any
-				json.Unmarshal([]byte(a), &args)
-				if q, ok := args["query"].(string); ok {
-					query = q
+				json.Unmarshal([]byte(arg), &args)
+				if u, ok := args["url"].(string); ok {
+					url = u
 				}
 			case map[string]any:
-				if q, ok := fn["arguments"].(map[string]any)["query"].(string); ok {
-					query = q
+				if u, ok := fn["arguments"].(map[string]any)["url"].(string); ok {
+					url = u
 				}
 			}
-			results, err := a.doWebSearch(query)
+			content, err := a.doWebFetch(url)
+			toolResult := ""
 			if err != nil {
-				a.writeOutput("\033[31mSearch error: %v\033[0m\n", err)
+				toolResult = fmt.Sprintf("Error: %v", err)
+				a.writeOutput("\033[31mFetch error: %v\033[0m\n", err)
 			} else {
-				a.writeOutput("\033[36m%s\033[0m\n", results)
+				toolResult = content
+				a.writeOutput("\033[36m%s\033[0m\n", content)
 			}
-			return nil
+			toolCallID := tc0["id"].(string)
+			argsStr, _ := fn["arguments"].(string)
+			a.messages = append(a.messages, Message{
+				Role:               "assistant",
+				ToolCalls:          []ToolCall{{ID: toolCallID, Type: "function", Function: ToolFunction{Name: "webfetch", Arguments: argsStr}}},
+				ToolCallID:         toolCallID,
+				ToolCallFunction:  "webfetch",
+				ToolCallResult:    toolResult,
+			})
+			return true, toolResult, nil
 		}
-		*/
 		var commands []Command
 		args := make(map[string]any)
 		
@@ -599,11 +697,13 @@ func (a *Agent) handleResponse(data []byte, interactive, autoConfirm bool) error
 			}
 		}
 
+		var toolResult string
 		for _, cmd := range commands {
-			if err := a.executeCommand(cmd, autoConfirm); err != nil {
-				a.writeOutput("\033[31mError: %v\033[0m\n", err)
+			result, err := a.executeCommand(cmd, autoConfirm)
+			if err != nil {
+				toolResult += fmt.Sprintf("%s error: %v\n", cmd.Type, err)
 			} else {
-				a.writeOutput("\033[32mDone: %s\033[0m\n", cmd.Type)
+				toolResult += result + "\n"
 			}
 		}
 
@@ -614,7 +714,7 @@ func (a *Agent) handleResponse(data []byte, interactive, autoConfirm bool) error
 			}
 			a.messages = append(a.messages, Message{Role: "assistant", ToolCalls: []ToolCall{toolCall}})
 		}
-		return nil
+		return true, toolResult, nil
 	}
 
 	if content, ok := msg["content"].(string); ok && content != "" {
@@ -624,7 +724,7 @@ func (a *Agent) handleResponse(data []byte, interactive, autoConfirm bool) error
 		}
 	}
 
-	return nil
+	return false, "", nil
 }
 
 type Command struct {
@@ -636,14 +736,28 @@ type Command struct {
 	New     string `json:"new,omitempty"`
 	Task    string `json:"task,omitempty"`
 	Status string `json:"status,omitempty"`
+	Result string `json:"-"`
 }
 
-func (a *Agent) executeCommand(cmd Command, autoConfirm bool) error {
+func (a *Agent) executeCommand(cmd Command, autoConfirm bool) (string, error) {
 	switch cmd.Type {
 	case "bash":
+		if !a.cfg.PermExec {
+			return "", fmt.Errorf("shell execution not allowed")
+		}
+		if strings.Contains(cmd.Command, "sudo") || strings.HasPrefix(strings.TrimSpace(cmd.Command), "sudo ") {
+			if !a.cfg.PermRoot {
+				rootCmds := []string{"rm -rf", "mkfs", "dd if=", ":(){:|:&}:", "chmod -R 000", "chown -R", "shutdown", "reboot", "init 6", "telinit 6"}
+				for _, dc := range rootCmds {
+					if strings.Contains(cmd.Command, dc) {
+						return "", fmt.Errorf("root/sudo execution not allowed")
+					}
+				}
+			}
+		}
 		if !autoConfirm {
 			if !a.cfg.Interactive {
-				return fmt.Errorf("enable auto-confirm or run in terminal mode")
+				return "", fmt.Errorf("enable auto-confirm or run in terminal mode")
 			}
 			a.writeOutput("\033[33mExecute '%s'? [y/N]\033[0m ", cmd.Command)
 			reader := bufio.NewReader(os.Stdin)
@@ -652,20 +766,43 @@ func (a *Agent) executeCommand(cmd Command, autoConfirm bool) error {
 			resp = strings.TrimSpace(strings.ToLower(resp))
 			if resp != "y" && resp != "yes" {
 				a.writeOutput("\033[31mCancelled\033[0m\n")
-				return nil
+				return "", nil
 			}
 		}
-		return a.execBash(cmd.Command)
+		err := a.execBash(cmd.Command)
+		return "Command executed: " + cmd.Command, err
 	case "read_file":
-		return a.readFile(cmd.Path)
+		if !a.cfg.PermRead {
+			return "", fmt.Errorf("file read not allowed")
+		}
+		err := a.readFile(cmd.Path)
+		return "File read: " + cmd.Path, err
 	case "create_file":
-		return a.createFile(cmd.Path, cmd.Content)
+		if !a.cfg.PermWrite {
+			return "", fmt.Errorf("file write not allowed")
+		}
+		err := a.createFile(cmd.Path, cmd.Content)
+		return "File created: " + cmd.Path, err
 	case "edit_file":
-		return a.editFile(cmd.Path, cmd.Old, cmd.New)
+		if !a.cfg.PermWrite {
+			return "", fmt.Errorf("file write not allowed")
+		}
+		err := a.editFile(cmd.Path, cmd.Old, cmd.New)
+		return "File edited: " + cmd.Path, err
+	case "delete_file":
+		if !a.cfg.PermDelete {
+			return "", fmt.Errorf("file delete not allowed")
+		}
+		err := a.deleteFile(cmd.Path)
+		return "File deleted: " + cmd.Path, err
 	case "update_kanban":
-		return a.updateKanban(cmd.Task, cmd.Status)
+		if !a.cfg.PermWrite {
+			return "", fmt.Errorf("kanban write not allowed")
+		}
+		err := a.updateKanban(cmd.Task, cmd.Status)
+		return "Kanban updated", err
 	default:
-		return fmt.Errorf("unknown command type: %s", cmd.Type)
+		return "", fmt.Errorf("unknown command type: %s", cmd.Type)
 	}
 }
 
@@ -742,6 +879,27 @@ func (a *Agent) editFile(path, oldStr, newStr string) error {
 	return nil
 }
 
+func (a *Agent) deleteFile(path string) error {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		err = os.RemoveAll(absPath)
+	} else {
+		err = os.Remove(absPath)
+	}
+	if err != nil {
+		return err
+	}
+	a.writeOutput("\033[32mDeleted: %s\033[0m\n", absPath)
+	return nil
+}
+
 func (a *Agent) updateKanban(task, status string) error {
 	kanbanPath := "kanban.md"
 
@@ -806,7 +964,7 @@ func (a *Agent) updateKanban(task, status string) error {
 }
 
 func (a *Agent) doWebSearch(query string) (string, error) {
-	apiKey := os.Getenv("FIRECRAWL_API_KEY")
+	apiKey := a.cfg.FirecrawlKey
 	if apiKey == "" {
 		apiKey = os.Getenv("FIRECRAWL_API_KEY")
 	}
@@ -843,18 +1001,295 @@ func (a *Agent) doWebSearch(query string) (string, error) {
 	json.Unmarshal(body, &result)
 
 	var output string
-	if data, ok := result["data"].([]any); ok && len(data) > 0 {
-		for i, item := range data {
-			if i > 4 {
-				break
+	if webData, ok := result["data"].(map[string]any); ok {
+		if data, ok := webData["web"].([]any); ok && len(data) > 0 {
+			for i, item := range data {
+				if i > 4 {
+					break
+				}
+				m := item.(map[string]any)
+				title, _ := m["title"].(string)
+				url, _ := m["url"].(string)
+				desc, _ := m["description"].(string)
+				output += fmt.Sprintf("%d. %s\n   %s\n   %s\n\n", i+1, title, url, desc)
 			}
-			m := item.(map[string]any)
-			title, _ := m["title"].(string)
-			url, _ := m["url"].(string)
-			desc, _ := m["description"].(string)
-			output += fmt.Sprintf("%d. %s\n   %s\n   %s\n\n", i+1, title, url, desc)
 		}
 	}
 
 	return output, nil
+}
+
+func (a *Agent) doWebFetch(url string) (string, error) {
+	if !a.cfg.PermInternet {
+		return "", fmt.Errorf("internet access not allowed")
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("fetch failed: %d", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 50000))
+	content := string(body)
+
+	content = regexp.MustCompile(`<[^>]+>`).ReplaceAllString(content, " ")
+	content = regexp.MustCompile(`\s+`).ReplaceAllString(content, " ")
+	content = strings.TrimSpace(content)
+
+	if len(content) > 3000 {
+		content = content[:3000] + "..."
+	}
+
+	return content, nil
+}
+
+func (a *Agent) fetchWithBrowser(url string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var browserOpts []chromedp.ExecAllocatorOption
+	browserOpts = append(browserOpts,
+		chromedp.Headless,
+		chromedp.DisableGPU,
+		chromedp.NoSandbox,
+		chromedp.Flag("disable-web-security", true),
+	)
+
+	allocCtx, _ := chromedp.NewExecAllocator(ctx, browserOpts...)
+	ctx, cancel = chromedp.NewContext(allocCtx)
+	defer cancel()
+
+	var htmlContent string
+	var timeText string
+
+	err := chromedp.Run(ctx,
+		chromedp.Navigate(url),
+		chromedp.Sleep(2*time.Second),
+		chromedp.OuterHTML(`html`, &htmlContent, chromedp.ByQuery),
+		chromedp.Text(`#ct`, &timeText, chromedp.ByID),
+	)
+
+	if err != nil {
+		if len(htmlContent) > 0 {
+			re := regexp.MustCompile(`(\d{1,2}:\d{2}:\d{2}\s*(?:AM|PM)?)`)
+			matches := re.FindStringSubmatch(htmlContent)
+			dateRe := regexp.MustCompile(`([A-Z][a-z]{2,}\s+[A-Z][a-z]{2,}\s+\d{1,2},?\s+\d{4})`)
+			dateMatch := dateRe.FindString(htmlContent)
+			if len(matches) > 1 {
+				return fmt.Sprintf("Time: %s, Date: %s", matches[1], dateMatch)
+			}
+		}
+		return fmt.Sprintf("Error: %v", err)
+	}
+
+	dateRe := regexp.MustCompile(`([A-Z][a-z]{2,}\s+[A-Z][a-z]{2,}\s+\d{1,2},?\s+\d{4})`)
+	dateMatch := dateRe.FindString(htmlContent)
+
+	if timeText != "" {
+		return fmt.Sprintf("Time: %s, Date: %s", strings.TrimSpace(timeText), dateMatch)
+	}
+
+	return "Time not found"
+}
+
+func (a *Agent) evalLoop(reqBody map[string]any, toolResult string) bool {
+	a.writeOutput("\033[33m→Evaluating result...\033[0m\n")
+
+	evalPrompt := fmt.Sprintf(`Based on the search results below, extract the current time in the requested location and provide a clear answer:
+
+%s
+
+Extract the most recent time available and respond with a concise answer. If satisfied, respond with "TASK_COMPLETE".`, toolResult)
+
+	var messages []map[string]any
+	if msgs, ok := reqBody["messages"].([]map[string]any); ok {
+		messages = append(messages, msgs...)
+	}
+	messages = append(messages, map[string]any{
+		"role":    "tool",
+		"content": toolResult,
+	})
+	messages = append(messages, map[string]any{
+		"role":    "user",
+		"content": evalPrompt,
+	})
+
+	evalBody := map[string]any{
+		"model":    a.cfg.Model,
+		"messages": messages,
+		"tools":    tools,
+		"tool_choice": "auto",
+	}
+
+	resp, err := a.sendRequest(evalBody)
+	if err != nil {
+		a.writeOutput("\033[31mEval error: %v\033[0m\n", err)
+		return false
+	}
+
+	var evalResp map[string]any
+	if err := json.Unmarshal(resp, &evalResp); err != nil {
+		a.writeOutput("\033[31mParse eval error: %v\033[0m\n", err)
+		return false
+	}
+
+	choices := evalResp["choices"].([]any)
+	choice := choices[0].(map[string]any)
+	msg := choice["message"].(map[string]any)
+
+	if content, ok := msg["content"].(string); ok {
+		if strings.Contains(content, "TASK_COMPLETE") {
+			a.writeOutput("\033[32m✓ Task complete\033[0m\n")
+			return false
+		}
+		a.writeOutput("\033[36m%s\033[0m\n", content)
+		if !strings.Contains(content, "search") && !strings.Contains(content, "result") {
+			return false
+		}
+
+		tc, hasTC := msg["tool_calls"]
+		if hasTC {
+			toolCalls := tc.([]any)
+			if len(toolCalls) > 0 {
+				tc0 := toolCalls[0].(map[string]any)
+				fn := tc0["function"].(map[string]any)
+				fnName := fn["name"].(string)
+
+				if fnName == "get_time" {
+					city := ""
+					switch arg := fn["arguments"].(type) {
+					case string:
+						var args map[string]any
+						json.Unmarshal([]byte(arg), &args)
+						if c, ok := args["city"].(string); ok {
+							city = c
+						}
+					}
+					cityMap := map[string]string{
+						"salvador": "America/Bahia",
+						"salvador, brazil": "America/Bahia",
+						"salvador, brasil": "America/Bahia",
+						"sao paulo": "America/Sao_Paulo",
+						"sao paulo, brazil": "America/Sao_Paulo",
+						"rio de janeiro": "America/Rio_Branco",
+						"new york": "America/New_York",
+						"london": "Europe/London",
+						"tokyo": "Asia/Tokyo",
+					}
+					timezone := cityMap[strings.ToLower(city)]
+					if timezone == "" {
+						timezone = "America/Bahia"
+					}
+					content, err := a.doWebFetch("https://worldtimeapi.org/api/timezone/" + strings.ReplaceAll(timezone, " ", "_"))
+					var newResult string
+					if err != nil {
+						newResult = fmt.Sprintf("Error: %v", err)
+					} else {
+						newResult = content
+					}
+					return a.evalLoop(reqBody, newResult)
+				}
+
+				if fnName == "websearch" {
+					if !a.cfg.PermInternet {
+						toolResult := "Internet access not allowed"
+						a.writeOutput("\033[31m%s\033[0m\n", toolResult)
+						return true
+					}
+					query := ""
+					switch arg := fn["arguments"].(type) {
+					case string:
+						var args map[string]any
+						json.Unmarshal([]byte(arg), &args)
+						if q, ok := args["query"].(string); ok {
+							query = q
+						}
+					}
+					results, err := a.doWebSearch(query)
+					var newResult string
+					if err != nil {
+						newResult = fmt.Sprintf("Error: %v", err)
+					} else {
+						newResult = results
+					}
+					return a.evalLoop(reqBody, newResult)
+				}
+				if fnName == "webfetch" {
+					url := ""
+					switch arg := fn["arguments"].(type) {
+					case string:
+						var args map[string]any
+						json.Unmarshal([]byte(arg), &args)
+						if u, ok := args["url"].(string); ok {
+							url = u
+						}
+					}
+					content, err := a.doWebFetch(url)
+					var newResult string
+					if err != nil {
+						newResult = fmt.Sprintf("Error: %v", err)
+					} else {
+						newResult = content
+					}
+					return a.evalLoop(reqBody, newResult)
+				}
+
+				var commands []Command
+				switch arg := fn["arguments"].(type) {
+				case string:
+					var args map[string]any
+					json.Unmarshal([]byte(arg), &args)
+					if cmds, ok := args["commands"].([]any); ok {
+						for _, c := range cmds {
+							m, _ := c.(map[string]any)
+							cmd := Command{}
+							if v, ok := m["type"].(string); ok {
+								cmd.Type = v
+							}
+							if v, ok := m["command"].(string); ok {
+								cmd.Command = v
+							}
+							if v, ok := m["path"].(string); ok {
+								cmd.Path = v
+							}
+							if v, ok := m["content"].(string); ok {
+								cmd.Content = v
+							}
+							if v, ok := m["old"].(string); ok {
+								cmd.Old = v
+							}
+							if v, ok := m["new"].(string); ok {
+								cmd.New = v
+							}
+							commands = append(commands, cmd)
+						}
+					}
+				}
+
+				for _, cmd := range commands {
+					_, err := a.executeCommand(cmd, a.cfg.Yes)
+					if err != nil {
+						a.writeOutput("\033[31mError: %v\033[0m\n", err)
+					} else {
+						a.writeOutput("\033[32mDone: %s\033[0m\n", cmd.Type)
+					}
+				}
+				return a.evalLoop(reqBody, "Commands executed")
+			}
+		}
+	}
+
+	return true
 }

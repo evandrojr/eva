@@ -13,4 +13,4 @@ clean:
 	rm -f eva
 
 dev-reload:
-	cd /home/j && air -c .air.toml
+	air 

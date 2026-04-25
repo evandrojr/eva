@@ -32,10 +32,11 @@ type Config struct {
 	Yes         bool
 	Setup       bool
 	Help        bool
+	PermInternet bool
 }
 
 func parseArgs(args []string) (Config, error) {
-	cfg := Config{Port: "11313"}
+	cfg := Config{Port: "11313", PermInternet: true}
 
 	for _, arg := range args[1:] {
 		if arg == "-h" || arg == "--help" {
@@ -55,9 +56,10 @@ func parseArgs(args []string) (Config, error) {
 	fs.BoolVar(&cfg.Web, "web", false, "Web UI mode")
 	fs.StringVar(&cfg.Port, "port", "11313", "Web UI port")
 	fs.BoolVar(&cfg.Lan, "lan", false, "Serve on all interfaces")
-	fs.BoolVar(&cfg.Install, "install", false, "Install as systemd service")
+fs.BoolVar(&cfg.Install, "install", false, "Install as systemd service")
 	fs.BoolVar(&cfg.Session, "session", false, "Enable session file")
-fs.BoolVar(&cfg.Yes, "y", false, "Skip confirmation prompt")
+	fs.BoolVar(&cfg.Yes, "y", false, "Skip confirmation prompt")
+	fs.BoolVar(&cfg.PermInternet, "internet", true, "Allow internet access (web search)")
 	fs.BoolVar(&cfg.Help, "h", false, "Show this help")
 	fs.BoolVar(&cfg.Setup, "setup", false, "Setup API keys")
 
@@ -107,6 +109,8 @@ func Run(args []string) error {
 		Model:   cfg.Model,
 		Session: cfg.Session,
 		Yes:     cfg.Yes,
+		PermInternet: cfg.PermInternet,
+		FirecrawlKey: os.Getenv("FIRECRAWL_API_KEY"),
 	})
 
 	if cfg.Interactive || cfg.Terminal {
@@ -131,6 +135,40 @@ func Run(args []string) error {
 func runWeb(port string, lan bool) error {
 	tmpl := template.Must(template.New("index").Parse(indexHTML))
 
+	http.HandleFunc("/config", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		home, _ := os.UserHomeDir()
+		data, err := os.ReadFile(filepath.Join(home, ".eva", "config.json"))
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]any{})
+			return
+		}
+		w.Write(data)
+	})
+
+	http.HandleFunc("/config/save", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			if err := r.ParseForm(); err != nil {
+				http.Error(w, "bad request", 400)
+				return
+			}
+			home, _ := os.UserHomeDir()
+			os.MkdirAll(filepath.Join(home, ".eva"), 0755)
+			cfg := map[string]any{
+				"firecrawl":    r.FormValue("firecrawl"),
+				"perm_internet": r.FormValue("perm_internet") == "true",
+				"perm_read":    r.FormValue("perm_read") == "true",
+				"perm_write":   r.FormValue("perm_write") == "true",
+				"perm_delete":  r.FormValue("perm_delete") == "true",
+				"perm_exec":   r.FormValue("perm_exec") == "true",
+				"perm_root":   r.FormValue("perm_root") == "true",
+			}
+			data, _ := json.Marshal(cfg)
+			os.WriteFile(filepath.Join(home, ".eva", "config.json"), data, 0644)
+			w.Write([]byte(`{"ok":true}`))
+		}
+	})
+
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" {
 			tmpl.Execute(w, nil)
@@ -140,7 +178,32 @@ func runWeb(port string, lan bool) error {
 		if r.Method == "POST" {
 			cmd := r.FormValue("command")
 			autoConfirm := r.FormValue("auto") == "on"
-			ag := agent.New(agent.Config{Yes: autoConfirm})
+			model := r.FormValue("model")
+			gateway := r.FormValue("gateway")
+			firecrawl := r.FormValue("firecrawl")
+			permInternet := r.FormValue("perm_internet") == "true"
+			permRead := r.FormValue("perm_read") == "true"
+			permWrite := r.FormValue("perm_write") == "true"
+			permDelete := r.FormValue("perm_delete") == "true"
+			permExec := r.FormValue("perm_exec") == "true"
+			permRoot := r.FormValue("perm_root") == "true"
+			cfg := agent.Config{Yes: autoConfirm, PermInternet: true}
+			if model != "" {
+				cfg.Model = model
+			}
+			if gateway != "" {
+				cfg.Gateway = gateway
+			}
+			if firecrawl != "" {
+				cfg.FirecrawlKey = firecrawl
+			}
+			cfg.PermInternet = permInternet
+			cfg.PermRead = permRead
+			cfg.PermWrite = permWrite
+			cfg.PermDelete = permDelete
+			cfg.PermExec = permExec
+			cfg.PermRoot = permRoot
+			ag := agent.New(cfg)
 			err := ag.Execute(cmd, false)
 
 			var out string
@@ -388,6 +451,7 @@ var indexHTML = `
                 <div class="tabs">
                         <button class="tab active" data-tab="cmd">Command + AI</button>
                         <button class="tab" data-tab="files">Files</button>
+                        <button class="tab" data-tab="settings">Settings</button>
                 </div>
                 <div id="cmd-tab">
                         <form id="cmd-form">
@@ -403,6 +467,32 @@ var indexHTML = `
                         <div class="files" id="files"></div>
                         <textarea id="editor" rows="20"></textarea>
                         <button id="save-btn" class="hidden">Save</button>
+                </div>
+                <div id="settings-tab" class="hidden">
+                        <div style="margin-bottom: 15px">
+                                <label style="display:block;margin-bottom:5px">Model</label>
+                                <input class="cmd" id="settings-model" placeholder="e.g. opencode, gpt-4o, claude-3-5-sonnet-20241022">
+                        </div>
+                        <div style="margin-bottom: 15px">
+                                <label style="display:block;margin-bottom:5px">Gateway URL</label>
+                                <input class="cmd" id="settings-gateway" placeholder="http://localhost:1313/v1/chat/completions">
+                        </div>
+                        <div style="margin-bottom: 15px">
+                                <label style="display:block;margin-bottom:5px">Firecrawl API Key</label>
+                                <input class="cmd" id="settings-firecrawl" placeholder="fc-...">
+                        </div>
+                        <div style="margin-bottom: 15px">
+                                <label style="display:block;margin-bottom:5px">Permissões</label>
+                                <div style="display:flex;flex-wrap:wrap;gap:10px">
+                                        <label><input type="checkbox" id="perm-internet"> Internet</label>
+                                        <label><input type="checkbox" id="perm-read"> Ler Arquivos</label>
+                                        <label><input type="checkbox" id="perm-write"> Escrever</label>
+                                        <label><input type="checkbox" id="perm-delete"> Apagar</label>
+                                        <label><input type="checkbox" id="perm-exec"> Executar Shell</label>
+                                        <label><input type="checkbox" id="perm-root"> Root</label>
+                                </div>
+                        </div>
+                        <button id="save-settings-btn">Save Settings</button>
                 </div>
 
                 <div id="logs"></div>
@@ -461,6 +551,7 @@ var indexHTML = `
                                 const tab = t.dataset.tab;
                                 document.getElementById('cmd-tab').classList.toggle('hidden', tab !== 'cmd');
                                 document.getElementById('files-tab').classList.toggle('hidden', tab !== 'files');
+                                document.getElementById('settings-tab').classList.toggle('hidden', tab !== 'settings');
                                 if (tab === 'files') loadFiles(currentPath);
                         });
                 });
@@ -496,8 +587,21 @@ var indexHTML = `
                         const input = e.target.querySelector('input[name="command"]').value;
                         btn.disabled = true;
                         btn.textContent = 'Running...';
+                        const formData = new FormData(e.target);
+                        const savedModel = localStorage.getItem('eva_model');
+                        const savedGateway = localStorage.getItem('eva_gateway');
+                        const savedFirecrawl = localStorage.getItem('eva_firecrawl');
+                        if (savedModel) formData.append('model', savedModel);
+                        if (savedGateway) formData.append('gateway', savedGateway);
+                        if (savedFirecrawl) formData.append('firecrawl', savedFirecrawl);
+                        formData.append('perm_internet', localStorage.getItem('eva_perm_internet') || 'false');
+                        formData.append('perm_read', localStorage.getItem('eva_perm_read') || 'false');
+                        formData.append('perm_write', localStorage.getItem('eva_perm_write') || 'false');
+                        formData.append('perm_delete', localStorage.getItem('eva_perm_delete') || 'false');
+                        formData.append('perm_exec', localStorage.getItem('eva_perm_exec') || 'false');
+                        formData.append('perm_root', localStorage.getItem('eva_perm_root') || 'false');
                         try {
-                                const res = await fetch('/', { method: 'POST', body: new FormData(e.target) });
+                                const res = await fetch('/', { method: 'POST', body: formData });
                                 const data = await res.json();
                                 
                                 // Add to AI chat in same tab
@@ -542,6 +646,82 @@ var indexHTML = `
                         alert('Saved!');
                 });
                 document.getElementById('refresh-btn').addEventListener('click', () => loadFiles(currentPath));
+
+                async function loadServerConfig() {
+                        try {
+                                const res = await fetch('/config');
+                                const cfg = await res.json();
+                                if (!localStorage.getItem('eva_firecrawl') && cfg.firecrawl) {
+                                        document.getElementById('settings-firecrawl').value = cfg.firecrawl;
+                                        localStorage.setItem('eva_firecrawl', cfg.firecrawl);
+                                }
+                                if (!localStorage.getItem('eva_perm_internet') && cfg.perm_internet) {
+                                        document.getElementById('perm-internet').checked = cfg.perm_internet;
+                                        localStorage.setItem('eva_perm_internet', cfg.perm_internet);
+                                }
+                                if (!localStorage.getItem('eva_perm_read') && cfg.perm_read) {
+                                        document.getElementById('perm-read').checked = cfg.perm_read;
+                                        localStorage.setItem('eva_perm_read', cfg.perm_read);
+                                }
+                                if (!localStorage.getItem('eva_perm_write') && cfg.perm_write) {
+                                        document.getElementById('perm-write').checked = cfg.perm_write;
+                                        localStorage.setItem('eva_perm_write', cfg.perm_write);
+                                }
+                                if (!localStorage.getItem('eva_perm_delete') && cfg.perm_delete) {
+                                        document.getElementById('perm-delete').checked = cfg.perm_delete;
+                                        localStorage.setItem('eva_perm_delete', cfg.perm_delete);
+                                }
+                                if (!localStorage.getItem('eva_perm_exec') && cfg.perm_exec) {
+                                        document.getElementById('perm-exec').checked = cfg.perm_exec;
+                                        localStorage.setItem('eva_perm_exec', cfg.perm_exec);
+                                }
+                                if (!localStorage.getItem('eva_perm_root') && cfg.perm_root) {
+                                        document.getElementById('perm-root').checked = cfg.perm_root;
+                                        localStorage.setItem('eva_perm_root', cfg.perm_root);
+                                }
+                        } catch(e) {}
+                }
+                loadServerConfig();
+                
+                if (localStorage.getItem('eva_model')) {
+                        document.getElementById('settings-model').value = localStorage.getItem('eva_model');
+                }
+                if (localStorage.getItem('eva_gateway')) {
+                        document.getElementById('settings-gateway').value = localStorage.getItem('eva_gateway');
+                }
+                if (localStorage.getItem('eva_firecrawl')) {
+                        document.getElementById('settings-firecrawl').value = localStorage.getItem('eva_firecrawl');
+                }
+                if (localStorage.getItem('eva_perm_internet') === 'true') document.getElementById('perm-internet').checked = true;
+                if (localStorage.getItem('eva_perm_read') === 'true') document.getElementById('perm-read').checked = true;
+                if (localStorage.getItem('eva_perm_write') === 'true') document.getElementById('perm-write').checked = true;
+                if (localStorage.getItem('eva_perm_delete') === 'true') document.getElementById('perm-delete').checked = true;
+                if (localStorage.getItem('eva_perm_exec') === 'true') document.getElementById('perm-exec').checked = true;
+                if (localStorage.getItem('eva_perm_root') === 'true') document.getElementById('perm-root').checked = true;
+                document.getElementById('save-settings-btn').addEventListener('click', () => {
+                        const model = document.getElementById('settings-model').value;
+                        const gateway = document.getElementById('settings-gateway').value;
+                        const firecrawl = document.getElementById('settings-firecrawl').value;
+                        if (model) localStorage.setItem('eva_model', model);
+                        if (gateway) localStorage.setItem('eva_gateway', gateway);
+                        if (firecrawl) localStorage.setItem('eva_firecrawl', firecrawl);
+                        localStorage.setItem('eva_perm_internet', document.getElementById('perm-internet').checked);
+                        localStorage.setItem('eva_perm_read', document.getElementById('perm-read').checked);
+                        localStorage.setItem('eva_perm_write', document.getElementById('perm-write').checked);
+                        localStorage.setItem('eva_perm_delete', document.getElementById('perm-delete').checked);
+                        localStorage.setItem('eva_perm_exec', document.getElementById('perm-exec').checked);
+                        localStorage.setItem('eva_perm_root', document.getElementById('perm-root').checked);
+                        const formData = new FormData();
+                        formData.append('firecrawl', document.getElementById('settings-firecrawl').value);
+                        formData.append('perm_internet', document.getElementById('perm-internet').checked);
+                        formData.append('perm_read', document.getElementById('perm-read').checked);
+                        formData.append('perm_write', document.getElementById('perm-write').checked);
+                        formData.append('perm_delete', document.getElementById('perm-delete').checked);
+                        formData.append('perm_exec', document.getElementById('perm-exec').checked);
+                        formData.append('perm_root', document.getElementById('perm-root').checked);
+                        fetch('/config/save', { method: 'POST', body: formData });
+                        alert('Settings saved!');
+                });
         </script>
 </body>
 </html>`

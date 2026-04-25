@@ -235,6 +235,12 @@ eva/
 - [ ] Tasks move between todo/in_progress/done
 - [ ] Status persisted to file
 
+### AC7: Self-Evaluation Loop
+- [ ] After executing a tool call (bash, websearch), evaluate the result
+- [ ] Send result back to LLM for evaluation
+- [ ] If result is not acceptable, retry with adjustments
+- [ ] Max 3 retry iterations to prevent infinite loops
+
 ### AC6: Edge Cases
 - [ ] Empty task shows helpful message
 - [ ] Gateway unreachable shows error
