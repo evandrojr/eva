@@ -438,7 +438,7 @@ var indexHTML = `
                 .file { background: #16213e; padding: 10px; border-radius: 4px; cursor: pointer }
                 .file:hover { background: #1f2f4f }
                 .dir { color: #00d4ff }
-                #ai-messages { height: 400px; overflow-y: auto; background: #16213e; padding: 15px; border-radius: 4px; margin-top: 10px; }
+                #ai-messages { height: 300px; overflow-y: auto; background: #16213e; padding: 15px; border-radius: 4px; margin-bottom: 20px; color: #00ff88; font-family: monospace; }
                 .ai-user { color: #00d4ff; font-weight: bold; margin: 10px 0; }
                 .ai-assistant { color: #90EE90; margin: 10px 0; white-space: pre-wrap; }
                 .ai-tool-call { color: #ffaa00; font-family: monospace; font-size: 12px; margin: 5px 0; }
@@ -453,13 +453,13 @@ var indexHTML = `
                         <button class="tab" data-tab="files">Files</button>
                         <button class="tab" data-tab="settings">Settings</button>
                 </div>
+                <div id="ai-messages"></div>
                 <div id="cmd-tab">
                         <form id="cmd-form">
                                 <input class="cmd" name="command" placeholder="Type command..." autofocus>
                                 <button>Run</button>
                         </form>
                         <label><input type="checkbox" name="auto"> Auto-confirm</label>
-                        <div id="ai-messages"></div>
                 </div>
                 <div id="files-tab" class="hidden">
                         <button id="refresh-btn">Refresh</button>
@@ -495,21 +495,22 @@ var indexHTML = `
                         <button id="save-settings-btn">Save Settings</button>
                 </div>
 
+
+
+                <div>Logs</div>
+                <span>EVA</span>
+                <label class="switch">
+                        <input type="checkbox" id="log-toggle">
+                        <span class="slider"></span>
+                </label>
+                <span style="margin-left: 20px">AI Gateway</span>
+                <label class="switch">
+                        <input type="checkbox" id="gwlog-toggle">
+                        <span class="slider"></span>
+                </label>
+
                 <div id="logs"></div>
                 <div id="gateway-logs"></div>
-
-                <div class="footer">
-                        <span>Logs EVA</span>
-                        <label class="switch">
-                                <input type="checkbox" id="log-toggle">
-                                <span class="slider"></span>
-                        </label>
-                        <span style="margin-left: 20px">AI Gateway</span>
-                        <label class="switch">
-                                <input type="checkbox" id="gwlog-toggle">
-                                <span class="slider"></span>
-                        </label>
-                </div>
         </div>
         <script>
                 let currentPath = '.';

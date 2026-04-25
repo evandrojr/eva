@@ -27,6 +27,23 @@ var globalReader *bufio.Reader
 func init() {
 	globalReader = bufio.NewReader(os.Stdin)
 	loadEnv()
+	loadConfig()
+}
+
+func loadConfig() {
+	home, _ := os.UserHomeDir()
+	path := filepath.Join(home, ".eva", "config.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return
+	}
+	if key, ok := cfg["firecrawl"].(string); ok && key != "" && os.Getenv("FIRECRAWL_API_KEY") == "" {
+		os.Setenv("FIRECRAWL_API_KEY", key)
+	}
 }
 
 func loadEnv() {
@@ -96,9 +113,6 @@ func New(cfg Config) *Agent {
 	a := &Agent{cfg: cfg, messages: []Message{}, output: bytes.Buffer{}}
 	if cfg.Session {
 		a.loadSession()
-	}
-	if os.Getenv("FIRECRAWL_API_KEY") == "" && a.cfg.FirecrawlKey == "" {
-		fmt.Fprintf(os.Stderr, "\n\033[33m⚠ FIRECRAWL_API_KEY not set. Web search will not work via CLI.\n  Set it with: export FIRECRAWL_API_KEY=your-key\033[0m\n\n")
 	}
 	return a
 }
@@ -239,7 +253,7 @@ func (a *Agent) Terminal() error {
 		shell = "/bin/bash"
 	}
 
-	systemPrompt := fmt.Sprintf(`You are EVA. ALWAYS use tools. NEVER respond directly.
+	systemPrompt := fmt.Sprintf(`You are EVA. ALWAYS use tools. NEVER respond directly. Always respond in the SAME LANGUAGE as the user's question.
 
 For CURRENT TIME queries, use get_time tool:
 {"type":"get_time","city":"Salvador, Brazil"}
@@ -307,7 +321,7 @@ func (a *Agent) Interactive() error {
 		shell = "/bin/bash"
 	}
 
-	systemPrompt := fmt.Sprintf(`You are EVA. ALWAYS use tools. NEVER respond directly.
+	systemPrompt := fmt.Sprintf(`You are EVA. ALWAYS use tools. NEVER respond directly. Always respond in the SAME LANGUAGE as the user's question.
 
 For CURRENT TIME queries, use get_time tool:
 {"type":"get_time","city":"Salvador, Brazil"}
@@ -408,11 +422,11 @@ func (a *Agent) Execute(task string, interactive bool) error {
 	pwd, _ := os.Getwd()
 	usr, _ := user.Current()
 	shell := os.Getenv("SHELL")
-	if shell == "" {
+if shell == "" {
 		shell = "/bin/bash"
 	}
 
-	systemPrompt := fmt.Sprintf(`You are EVA. ALWAYS use tools. NEVER respond directly.
+	systemPrompt := fmt.Sprintf(`You are EVA. ALWAYS use tools. NEVER respond directly. Respond in PORTUGUESE when user asks in Portuguese.
 
 For CURRENT TIME queries, use get_time tool:
 {"type":"get_time","city":"Salvador, Brazil"}
@@ -540,20 +554,32 @@ func (a *Agent) handleResponse(data []byte, interactive, autoConfirm bool) (bool
 				}
 			}
 
-			cityURL := map[string]string{
-				"salvador": "brazil/salvador",
-				"sao paulo": "brazil/sao-paulo",
-				"new york": "usa/new-york",
-				"london": "uk/london",
-				"tokyo": "japan/tokyo",
+			timezoneMap := map[string]string{
+				"salvador": "America/Bahia",
+				"salvador, brazil": "America/Bahia",
+				"salvador, bahia": "America/Bahia",
+				"sao paulo": "America/Sao_Paulo",
+				"sao paulo, brazil": "America/Sao_Paulo",
+				"rio de janeiro": "America/Rio_Branco",
+				"new york": "America/New_York",
+				"london": "Europe/London",
+				"tokyo": "Asia/Tokyo",
 			}
 
-			urlPath := cityURL[strings.ToLower(city)]
-			if urlPath == "" {
-				urlPath = "brazil/salvador"
+			tz := timezoneMap[strings.ToLower(city)]
+			if tz == "" {
+				tz = "America/Bahia"
 			}
 
-			toolResult := a.fetchWithBrowser("https://www.timeanddate.com/worldclock/" + urlPath)
+			cmd := exec.Command("bash", "-c", `TZ="`+tz+`" date "+%H:%M:%S %A, %B %d, %Y"`)
+			output, err := cmd.Output()
+			toolResult := ""
+			if err == nil {
+				toolResult = "Current time: " + strings.TrimSpace(string(output))
+			} else {
+				toolResult = "Error getting time: " + err.Error()
+			}
+
 			a.writeOutput("\033[36m%s\033[0m\n", toolResult)
 
 			toolCallID := tc0["id"].(string)
@@ -601,6 +627,9 @@ func (a *Agent) handleResponse(data []byte, interactive, autoConfirm bool) (bool
 			results, err := a.doWebSearch(query)
 			toolResult := ""
 			if err != nil {
+				if strings.Contains(err.Error(), "not set") || strings.Contains(err.Error(), "FIRECRAWL") {
+					a.writeOutput("\033[33m⚠ Web search unavailable. Set FIRECRAWL_API_KEY for web search.\033[0m\n")
+				}
 				toolResult = fmt.Sprintf("Error: %v", err)
 				a.writeOutput("\033[31mSearch error: %v\033[0m\n", err)
 			} else {
@@ -968,55 +997,92 @@ func (a *Agent) doWebSearch(query string) (string, error) {
 	if apiKey == "" {
 		apiKey = os.Getenv("FIRECRAWL_API_KEY")
 	}
-	if apiKey == "" {
-		return "", fmt.Errorf("FIRECRAWL_API_KEY not set")
-	}
 
-	searchURL := "https://api.firecrawl.dev/v2/search"
-	jsonData, _ := json.Marshal(map[string]any{
-		"query": query,
-		"limit": 5,
-	})
+	if apiKey != "" {
+		searchURL := "https://api.firecrawl.dev/v2/search"
+		jsonData, _ := json.Marshal(map[string]any{
+			"query": query,
+			"limit": 5,
+		})
 
-	httpReq, err := http.NewRequest("POST", searchURL, bytes.NewReader(jsonData))
-	if err != nil {
-		return "", err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+		httpReq, err := http.NewRequest("POST", searchURL, bytes.NewReader(jsonData))
+		if err == nil {
+			httpReq.Header.Set("Content-Type", "application/json")
+			httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
+			client := &http.Client{Timeout: 30 * time.Second}
+			resp, err := client.Do(httpReq)
+			if err == nil {
+				defer resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					body, _ := io.ReadAll(resp.Body)
+					var result map[string]any
+					json.Unmarshal(body, &result)
 
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("search failed: %s", string(body))
-	}
-
-	var result map[string]any
-	json.Unmarshal(body, &result)
-
-	var output string
-	if webData, ok := result["data"].(map[string]any); ok {
-		if data, ok := webData["web"].([]any); ok && len(data) > 0 {
-			for i, item := range data {
-				if i > 4 {
-					break
+					var output string
+					if webData, ok := result["data"].(map[string]any); ok {
+						if data, ok := webData["web"].([]any); ok && len(data) > 0 {
+							for i, item := range data {
+								if i > 4 {
+									break
+								}
+								m := item.(map[string]any)
+								title, _ := m["title"].(string)
+								url, _ := m["url"].(string)
+								desc, _ := m["description"].(string)
+								output += fmt.Sprintf("%d. %s\n   %s\n   %s\n\n", i+1, title, url, desc)
+							}
+						}
+					}
+					if output != "" {
+						return output, nil
+					}
 				}
-				m := item.(map[string]any)
-				title, _ := m["title"].(string)
-				url, _ := m["url"].(string)
-				desc, _ := m["description"].(string)
-				output += fmt.Sprintf("%d. %s\n   %s\n   %s\n\n", i+1, title, url, desc)
 			}
 		}
 	}
 
-	return output, nil
+	searchURL := "https://www.google.com/search?q=" + strings.ReplaceAll(query, " ", "+")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	allocCtx, _ := chromedp.NewExecAllocator(ctx, chromedp.DefaultExecAllocatorOptions[:]...)
+	taskCtx, _ := chromedp.NewContext(allocCtx)
+
+	if err := chromedp.Navigate(searchURL).Do(taskCtx); err != nil {
+		return "", fmt.Errorf("chromedp navigate failed: %w", err)
+	}
+
+	if err := chromedp.WaitVisible("#search").Do(taskCtx); err != nil {
+		return "", fmt.Errorf("chromedp wait failed: %w", err)
+	}
+
+	var resultHTML string
+	if err := chromedp.OuterHTML("html", &resultHTML).Do(taskCtx); err != nil {
+		return "", fmt.Errorf("chromedp outerHTML failed: %w", err)
+	}
+
+	var results []string
+	re := regexp.MustCompile(`<a href="(https?://[^\s"']+)"[^>]*>([^<]+)</a>`)
+	matches := re.FindAllStringSubmatch(resultHTML, -1)
+	seen := make(map[string]bool)
+	for _, m := range matches {
+		if len(m) == 3 {
+			url := m[1]
+			title := regexp.MustCompile(`<[^>]+>`).ReplaceAllString(m[2], "")
+			if !strings.Contains(url, "google") && !strings.Contains(url, "youtube.com/redirect") &&
+				!seen[url] && len(results) < 5 && len(url) > 20 {
+				seen[url] = true
+				results = append(results, fmt.Sprintf("%d. %s\n   %s\n\n", len(results)+1, title, url))
+			}
+		}
+	}
+
+	if len(results) == 0 {
+		return "", fmt.Errorf("no results found")
+	}
+
+	return strings.Join(results, ""), nil
 }
 
 func (a *Agent) doWebFetch(url string) (string, error) {
@@ -1107,11 +1173,11 @@ func (a *Agent) fetchWithBrowser(url string) string {
 func (a *Agent) evalLoop(reqBody map[string]any, toolResult string) bool {
 	a.writeOutput("\033[33m→Evaluating result...\033[0m\n")
 
-	evalPrompt := fmt.Sprintf(`Based on the search results below, extract the current time in the requested location and provide a clear answer:
+	evalPrompt := fmt.Sprintf(`O usuário perguntou a hora. Com base no resultado abaixo, responda na MESMA LINGUA do usuário:
 
 %s
 
-Extract the most recent time available and respond with a concise answer. If satisfied, respond with "TASK_COMPLETE".`, toolResult)
+Responda de forma clara e concisa. Se satisfeito, responda "TASK_COMPLETE".`, toolResult)
 
 	var messages []map[string]any
 	if msgs, ok := reqBody["messages"].([]map[string]any); ok {
