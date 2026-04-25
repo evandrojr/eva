@@ -181,7 +181,6 @@ func runWeb(port string, lan bool) error {
 		}
 		if r.Method == "POST" {
 			cmd := r.FormValue("command")
-			autoConfirm := r.FormValue("auto") == "on"
 			model := r.FormValue("model")
 			gateway := r.FormValue("gateway")
 			firecrawl := r.FormValue("firecrawl")
@@ -192,7 +191,7 @@ func runWeb(port string, lan bool) error {
 			permExec := r.FormValue("perm_exec") == "true"
 			permRoot := r.FormValue("perm_root") == "true"
 			verbose := r.FormValue("verbose") == "true"
-			cfg := agent.Config{Yes: autoConfirm, PermInternet: true, Verbose: verbose}
+			cfg := agent.Config{Yes: true, PermInternet: true, Verbose: verbose}
 			if model != "" {
 				cfg.Model = model
 			}
